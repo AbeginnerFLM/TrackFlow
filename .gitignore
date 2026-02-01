@@ -1,0 +1,24 @@
+# 编译产物
+build/
+cmake-build-*/
+
+# 第三方库（太大，让用户自己下载）
+third_party/onnxruntime*/
+third_party/uWebSockets/
+
+# 模型文件（太大）
+models/*.onnx
+models/*.pt
+
+# 压缩包
+*.tar.gz
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 系统文件
+.DS_Store
+Thumbs.db
+third_party/onnxruntime*

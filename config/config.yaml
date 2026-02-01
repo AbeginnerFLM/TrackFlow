@@ -1,0 +1,21 @@
+# TrackFlow 服务器配置
+
+server:
+  port: 9001
+  threads: 2
+
+models:
+  yolo:
+    path: "models/yolo_obb.onnx"
+    confidence: 0.5
+    nms_threshold: 0.45
+    is_obb: true
+
+tracker:
+  track_thresh: 0.5
+  high_thresh: 0.6
+  match_thresh: 0.8
+  max_time_lost: 30
+
+logging:
+  level: "info"  # debug, info, warn, error
