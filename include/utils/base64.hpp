@@ -113,31 +113,31 @@ inline std::vector<uint8_t> decode(const std::string &encoded) {
   if (encoded.empty())
     return {};
 
-  // 计算输出长度
-  size_t len = encoded.size();
-  size_t padding = 0;
-  if (len >= 1 && encoded[len - 1] == '=')
-    padding++;
-  if (len >= 2 && encoded[len - 2] == '=')
-    padding++;
+  // 先清理输入：移除空白字符和padding，只保留有效Base64字符
+  std::string clean;
+  clean.reserve(encoded.size());
+  for (char c : encoded) {
+    if (c != '=' && c != '\n' && c != '\r' && c != ' ' && c != '\t') {
+      int8_t val = detail::DECODE_TABLE[static_cast<uint8_t>(c)];
+      if (val >= 0) {
+        clean += c;
+      }
+    }
+  }
 
-  size_t out_len = (len / 4) * 3 - padding;
+  if (clean.empty())
+    return {};
+
+  // 计算输出长度：每4个Base64字符解码为3字节
+  size_t out_len = (clean.size() * 3) / 4;
   std::vector<uint8_t> result;
   result.reserve(out_len);
 
   uint32_t buffer = 0;
   int bits = 0;
 
-  for (char c : encoded) {
-    if (c == '=' || c == '\n' || c == '\r' || c == ' ') {
-      continue;
-    }
-
+  for (char c : clean) {
     int8_t val = detail::DECODE_TABLE[static_cast<uint8_t>(c)];
-    if (val < 0) {
-      throw std::runtime_error("Invalid Base64 character");
-    }
-
     buffer = (buffer << 6) | val;
     bits += 6;
 
