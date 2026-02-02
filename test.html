@@ -435,7 +435,7 @@
                 }
 
                 if (response.type === 'error') {
-                    addLog(`❌ Error: ${response.message}`, 'error');
+                    addLog(`❌ Error: ${response.error || response.message || 'Unknown error'}`, 'error');
                     return;
                 }
 
