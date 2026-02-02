@@ -126,10 +126,12 @@ void WebSocketServer::handle_message(void *ws_ptr, const std::string &message) {
         response = {{"type", "pong"}, {"request_id", request_id}};
       } else if (request_type == "infer") {
         // 推理请求
+        spdlog::debug("Processing infer request...");
 
         // 获取或创建Session (每个session有独立的有状态处理器)
         std::string session_id =
             request.value("session_id", socket_data->session_id);
+        spdlog::debug("Session ID: {}", session_id);
 
         // 创建Pipeline配置
         json pipeline_config;
@@ -141,25 +143,38 @@ void WebSocketServer::handle_message(void *ws_ptr, const std::string &message) {
               {"pipeline", {"decoder", "yolo", "tracker"}},
               {"config", request.value("config", json::object())}};
         }
+        spdlog::debug("Pipeline config created");
 
         // 获取或创建Session
         auto &session = sessions_.get_or_create(session_id, pipeline_config);
+        spdlog::debug("Session ready");
 
         // 创建处理上下文
         ProcessingContext ctx;
         ctx.frame_id = request.value("frame_id", 0);
         ctx.session_id = session_id;
         ctx.request_id = request_id;
+        spdlog::debug("Context created for frame {}", ctx.frame_id);
 
         // 设置图像数据
         if (request.contains("image")) {
+          spdlog::debug("Extracting image from request...");
+          // 获取图像字符串的大小
+          if (request["image"].is_string()) {
+            size_t img_size = request["image"].get<std::string_view>().size();
+            spdlog::debug("Image field size: {} bytes", img_size);
+          }
+          spdlog::debug("Setting image_base64 in context...");
           ctx.set("image_base64", request["image"].get<std::string>());
+          spdlog::debug("Image set in context");
         } else {
           throw std::runtime_error("Missing 'image' field in request");
         }
 
         // 执行Pipeline
+        spdlog::debug("Starting pipeline execution...");
         bool success = session.pipeline.execute(ctx);
+        spdlog::debug("Pipeline execution complete, success={}", success);
 
         // 构建响应
         response = build_response(ctx, request, success);
