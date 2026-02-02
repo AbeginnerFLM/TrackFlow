@@ -332,16 +332,48 @@
             addLog('📤 Sent ping', 'info');
         }
 
+        // 压缩图片到指定最大尺寸
+        function compressImage(img, maxSize = 1280, quality = 0.85) {
+            let width = img.width;
+            let height = img.height;
+
+            // 计算缩放比例
+            if (width > maxSize || height > maxSize) {
+                if (width > height) {
+                    height = Math.round(height * maxSize / width);
+                    width = maxSize;
+                } else {
+                    width = Math.round(width * maxSize / height);
+                    height = maxSize;
+                }
+            }
+
+            // 使用临时canvas压缩
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = width;
+            tempCanvas.height = height;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(img, 0, 0, width, height);
+
+            // 转为JPEG压缩
+            return tempCanvas.toDataURL('image/jpeg', quality);
+        }
+
         function handleFile(file) {
             if (!file) return;
 
             const reader = new FileReader();
             reader.onload = (e) => {
-                currentImage = e.target.result;
+                const originalData = e.target.result;
 
-                // Show preview
+                // Show preview and compress
                 const img = new Image();
                 img.onload = () => {
+                    // 压缩图片
+                    const originalSize = (originalData.length / 1024).toFixed(0);
+                    currentImage = compressImage(img, 1280, 0.85);
+                    const compressedSize = (currentImage.length / 1024).toFixed(0);
+
                     dropZone.innerHTML = '';
                     dropZone.appendChild(img);
 
@@ -349,11 +381,12 @@
                     canvas.width = img.width;
                     canvas.height = img.height;
                     ctx.drawImage(img, 0, 0);
-                };
-                img.src = currentImage;
 
-                document.getElementById('inferBtn').disabled = !(ws && ws.readyState === WebSocket.OPEN);
-                addLog(`📷 Loaded image: ${file.name}`, 'success');
+                    document.getElementById('inferBtn').disabled = !(ws && ws.readyState === WebSocket.OPEN);
+                    addLog(`📷 Loaded image: ${file.name} (${img.width}x${img.height})`, 'success');
+                    addLog(`📦 Compressed: ${originalSize}KB → ${compressedSize}KB`, 'info');
+                };
+                img.src = originalData;
             };
             reader.readAsDataURL(file);
         }
