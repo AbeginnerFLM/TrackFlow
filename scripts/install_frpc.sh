@@ -23,6 +23,9 @@ cat > frpc.toml << 'EOF'
 serverAddr = "142.171.65.88"
 serverPort = 7000
 
+# 认证令牌（必须与服务端一致）
+auth.token = "TrackFlow@2026!Secure"
+
 [[proxies]]
 name = "trackflow-ws"
 type = "tcp"
