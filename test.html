@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>TrackFlow Inference Test</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            padding: 20px;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #eee;
+            min-height: 100vh;
+            margin: 0;
+        }
+
+        h1 {
+            color: #4ade80;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .panel {
+            background: rgba(22, 33, 62, 0.8);
+            padding: 20px;
+            border-radius: 15px;
+            margin: 15px 0;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .row {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .col {
+            flex: 1;
+            min-width: 300px;
+        }
+
+        button {
+            background: linear-gradient(135deg, #0f3460, #1a1a2e);
+            color: white;
+            border: 1px solid #4ade80;
+            padding: 12px 24px;
+            cursor: pointer;
+            border-radius: 8px;
+            margin: 5px;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+
+        button:hover {
+            background: #4ade80;
+            color: #1a1a2e;
+            transform: translateY(-2px);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        #dropZone {
+            border: 3px dashed #4ade80;
+            border-radius: 15px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            min-height: 200px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #dropZone:hover,
+        #dropZone.dragover {
+            background: rgba(74, 222, 128, 0.1);
+            border-color: #22c55e;
+        }
+
+        #dropZone img {
+            max-width: 100%;
+            max-height: 300px;
+            border-radius: 10px;
+        }
+
+        #canvas {
+            max-width: 100%;
+            border-radius: 10px;
+            background: #0f0f0f;
+        }
+
+        #log {
+            background: #0a0a0a;
+            padding: 15px;
+            border-radius: 10px;
+            font-family: 'Consolas', monospace;
+            font-size: 12px;
+            height: 200px;
+            overflow-y: auto;
+            border: 1px solid #333;
+        }
+
+        .success {
+            color: #4ade80;
+        }
+
+        .error {
+            color: #f87171;
+        }
+
+        .info {
+            color: #60a5fa;
+        }
+
+        .warn {
+            color: #fbbf24;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            margin-left: 10px;
+        }
+
+        .status.connected {
+            background: #166534;
+            color: #4ade80;
+        }
+
+        .status.disconnected {
+            background: #7f1d1d;
+            color: #f87171;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .stat-box {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .stat-box .value {
+            font-size: 24px;
+            color: #4ade80;
+            font-weight: bold;
+        }
+
+        .stat-box .label {
+            font-size: 11px;
+            color: #888;
+            margin-top: 5px;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .detection-info {
+            margin-top: 10px;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            font-size: 12px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>🚀 TrackFlow Inference Test</h1>
+
+        <div class="panel">
+            <h3>Connection
+                <span id="statusBadge" class="status disconnected">Disconnected</span>
+            </h3>
+            <button onclick="connect()">Connect</button>
+            <button onclick="disconnect()">Disconnect</button>
+            <button onclick="sendPing()">Ping</button>
+        </div>
+
+        <div class="row">
+            <div class="col">
+                <div class="panel">
+                    <h3>📤 Input</h3>
+                    <div id="dropZone" onclick="document.getElementById('fileInput').click()">
+                        <p>🖼️ Drag & Drop image here</p>
+                        <p style="color:#888; font-size:12px">or click to select</p>
+                    </div>
+                    <input type="file" id="fileInput" accept="image/*" onchange="handleFile(this.files[0])">
+                    <div style="margin-top:15px">
+                        <button onclick="sendInfer()" id="inferBtn" disabled>🔍 Run Inference</button>
+                        <button onclick="clearAll()">🗑️ Clear</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col">
+                <div class="panel">
+                    <h3>📥 Result</h3>
+                    <canvas id="canvas" width="640" height="480"></canvas>
+                    <div id="detectionInfo" class="detection-info" style="display:none"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h3>📊 Statistics</h3>
+            <div class="stats">
+                <div class="stat-box">
+                    <div class="value" id="statLatency">-</div>
+                    <div class="label">Latency (ms)</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value" id="statDetections">-</div>
+                    <div class="label">Detections</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value" id="statFPS">-</div>
+                    <div class="label">FPS</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value" id="statFrames">0</div>
+                    <div class="label">Frames</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h3>📝 Log</h3>
+            <div id="log"></div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let currentImage = null;
+        let frameId = 0;
+        let inferStartTime = 0;
+
+        const log = document.getElementById('log');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const dropZone = document.getElementById('dropZone');
+
+        // Color palette for different classes
+        const colors = [
+            '#4ade80', '#f87171', '#60a5fa', '#fbbf24', '#a78bfa',
+            '#fb7185', '#34d399', '#38bdf8', '#facc15', '#c084fc'
+        ];
+
+        function addLog(msg, type = 'info') {
+            const time = new Date().toLocaleTimeString();
+            log.innerHTML += `<div class="${type}">[${time}] ${msg}</div>`;
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function updateStatus(connected) {
+            const badge = document.getElementById('statusBadge');
+            badge.textContent = connected ? 'Connected' : 'Disconnected';
+            badge.className = 'status ' + (connected ? 'connected' : 'disconnected');
+        }
+
+        function connect() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                addLog('Already connected', 'warn');
+                return;
+            }
+
+            const url = 'ws://142.171.65.88:9001';
+            addLog(`Connecting to ${url}...`, 'info');
+
+            ws = new WebSocket(url);
+
+            ws.onopen = () => {
+                addLog('✅ Connected!', 'success');
+                updateStatus(true);
+                document.getElementById('inferBtn').disabled = !currentImage;
+            };
+
+            ws.onmessage = (e) => {
+                handleResponse(e.data);
+            };
+
+            ws.onerror = (e) => {
+                addLog('❌ Connection error', 'error');
+                updateStatus(false);
+            };
+
+            ws.onclose = () => {
+                addLog('🔌 Disconnected', 'info');
+                updateStatus(false);
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        function sendPing() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                addLog('Not connected', 'error');
+                return;
+            }
+            ws.send(JSON.stringify({ type: 'ping' }));
+            addLog('📤 Sent ping', 'info');
+        }
+
+        function handleFile(file) {
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                currentImage = e.target.result;
+
+                // Show preview
+                const img = new Image();
+                img.onload = () => {
+                    dropZone.innerHTML = '';
+                    dropZone.appendChild(img);
+
+                    // Draw on canvas too
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    ctx.drawImage(img, 0, 0);
+                };
+                img.src = currentImage;
+
+                document.getElementById('inferBtn').disabled = !(ws && ws.readyState === WebSocket.OPEN);
+                addLog(`📷 Loaded image: ${file.name}`, 'success');
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function sendInfer() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                addLog('Not connected', 'error');
+                return;
+            }
+            if (!currentImage) {
+                addLog('No image loaded', 'error');
+                return;
+            }
+
+            frameId++;
+            inferStartTime = performance.now();
+
+            const request = {
+                type: 'infer',
+                request_id: 'req_' + Date.now(),
+                frame_id: frameId,
+                image: currentImage,
+                config: {
+                    yolo: {
+                        model_path: 'models/yolo26.onnx',
+                        confidence: 0.5,
+                        nms_threshold: 0.45
+                    },
+                    tracker: {
+                        enabled: true
+                    }
+                }
+            };
+
+            ws.send(JSON.stringify(request));
+            addLog(`📤 Sent inference request (frame ${frameId})`, 'info');
+        }
+
+        function handleResponse(data) {
+            try {
+                const response = JSON.parse(data);
+
+                if (response.type === 'pong') {
+                    addLog('📩 Received pong', 'success');
+                    return;
+                }
+
+                if (response.type === 'error') {
+                    addLog(`❌ Error: ${response.message}`, 'error');
+                    return;
+                }
+
+                // Calculate latency
+                const latency = performance.now() - inferStartTime;
+                document.getElementById('statLatency').textContent = latency.toFixed(0);
+                document.getElementById('statFPS').textContent = (1000 / latency).toFixed(1);
+                document.getElementById('statFrames').textContent = frameId;
+
+                // Process detections
+                const detections = response.detections || [];
+                document.getElementById('statDetections').textContent = detections.length;
+
+                addLog(`📩 Received ${detections.length} detections (${latency.toFixed(0)}ms)`, 'success');
+
+                // Draw detections
+                drawDetections(detections);
+                showDetectionInfo(detections);
+
+            } catch (e) {
+                addLog(`Parse error: ${e.message}`, 'error');
+                console.error(e);
+            }
+        }
+
+        function drawDetections(detections) {
+            // Redraw original image
+            const img = dropZone.querySelector('img');
+            if (img) {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
+            }
+
+            // Draw each detection
+            detections.forEach((det, i) => {
+                const color = colors[det.class_id % colors.length];
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 3;
+                ctx.fillStyle = color;
+                ctx.font = 'bold 14px Arial';
+
+                if (det.obb) {
+                    // Draw OBB (rotated bounding box)
+                    const pts = det.obb;
+                    ctx.beginPath();
+                    ctx.moveTo(pts[0], pts[1]);
+                    ctx.lineTo(pts[2], pts[3]);
+                    ctx.lineTo(pts[4], pts[5]);
+                    ctx.lineTo(pts[6], pts[7]);
+                    ctx.closePath();
+                    ctx.stroke();
+
+                    // Label
+                    const label = `${det.class_name || det.class_id} ${(det.confidence * 100).toFixed(0)}%`;
+                    ctx.fillStyle = color;
+                    ctx.fillRect(pts[0], pts[1] - 20, ctx.measureText(label).width + 10, 20);
+                    ctx.fillStyle = '#000';
+                    ctx.fillText(label, pts[0] + 5, pts[1] - 5);
+                } else if (det.bbox) {
+                    // Draw HBB (horizontal bounding box)
+                    const [x, y, w, h] = det.bbox;
+                    ctx.strokeRect(x, y, w, h);
+
+                    // Label
+                    const label = `${det.class_name || det.class_id} ${(det.confidence * 100).toFixed(0)}%`;
+                    ctx.fillStyle = color;
+                    ctx.fillRect(x, y - 20, ctx.measureText(label).width + 10, 20);
+                    ctx.fillStyle = '#000';
+                    ctx.fillText(label, x + 5, y - 5);
+                }
+
+                // Draw track ID if available
+                if (det.track_id !== undefined && det.track_id >= 0) {
+                    ctx.fillStyle = '#fff';
+                    ctx.fillText(`ID: ${det.track_id}`, det.bbox ? det.bbox[0] : det.obb[0], (det.bbox ? det.bbox[1] : det.obb[1]) + 15);
+                }
+            });
+        }
+
+        function showDetectionInfo(detections) {
+            const info = document.getElementById('detectionInfo');
+            if (detections.length === 0) {
+                info.style.display = 'none';
+                return;
+            }
+
+            info.style.display = 'block';
+            info.innerHTML = detections.map((det, i) =>
+                `<div style="margin:5px 0">
+                    <span style="color:${colors[det.class_id % colors.length]}">●</span>
+                    ${det.class_name || 'Class ' + det.class_id} 
+                    (${(det.confidence * 100).toFixed(1)}%)
+                    ${det.track_id >= 0 ? `[Track #${det.track_id}]` : ''}
+                </div>`
+            ).join('');
+        }
+
+        function clearAll() {
+            dropZone.innerHTML = '<p>🖼️ Drag & Drop image here</p><p style="color:#888; font-size:12px">or click to select</p>';
+            currentImage = null;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            document.getElementById('detectionInfo').style.display = 'none';
+            document.getElementById('inferBtn').disabled = true;
+        }
+
+        // Drag and drop handlers
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file && file.type.startsWith('image/')) {
+                handleFile(file);
+            }
+        });
+
+        addLog('Page loaded. Click "Connect" to start.', 'info');
+    </script>
+</body>
+
+</html>
