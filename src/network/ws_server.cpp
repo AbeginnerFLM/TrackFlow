@@ -217,6 +217,7 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
       } catch (const std::exception &e) {
         std::cerr << "DEBUG_TRACE: CAUGHT EXCEPTION: " << e.what() << std::endl;
         spdlog::error("Binary processing error: {}", e.what());
+        spdlog::default_logger()->flush();
         response = build_error(e.what());
       }
 
