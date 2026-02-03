@@ -88,14 +88,25 @@ Args parse_args(int argc, char *argv[]) {
   return args;
 }
 
+#include <spdlog/sinks/basic_file_sink.h>
+
 void setup_logging(bool verbose) {
-  auto console = spdlog::stdout_color_mt("console");
-  spdlog::set_default_logger(console);
+  auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+  auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
+      "server_debug_fixed.log", true);
+
+  std::vector<spdlog::sink_ptr> sinks{console_sink, file_sink};
+  auto logger = std::make_shared<spdlog::logger>("multi_sink", sinks.begin(),
+                                                 sinks.end());
+
+  spdlog::set_default_logger(logger);
 
   if (verbose) {
     spdlog::set_level(spdlog::level::debug);
+    spdlog::default_logger()->flush_on(spdlog::level::debug);
   } else {
     spdlog::set_level(spdlog::level::info);
+    spdlog::default_logger()->flush_on(spdlog::level::info);
   }
 
   spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
