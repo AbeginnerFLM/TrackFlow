@@ -19,7 +19,11 @@ async def test():
             "request_id": "test_bin_1",
             "frame_id": 1,
             "session_id": "test_session",
-            "config": {"tracker": {"enabled": False}}
+            "config": {
+                "tracker": {"enabled": False},
+                "yolo": {"model_path": "models/yolo26.onnx"}
+            },
+            "pipeline": ["decoder"]
         }
         await websocket.send(json.dumps(header))
         

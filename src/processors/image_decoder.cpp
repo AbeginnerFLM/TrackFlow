@@ -13,44 +13,56 @@ bool ImageDecoder::process(ProcessingContext &ctx) {
 
   std::vector<uint8_t> decoded;
 
-  // 1. 优先检查二进制数据
+  cv::Mat data_wrapper;
+
+  // 1. 优先检查二进制数据 (使用shared_ptr)
   if (ctx.has("image_binary")) {
-    spdlog::debug("ImageDecoder: Using binary image data");
-    decoded = ctx.get<std::vector<uint8_t>>("image_binary");
+    spdlog::debug("ImageDecoder: Using binary image data (shared_ptr)");
+    auto ptr = ctx.get<std::shared_ptr<std::vector<uint8_t>>>("image_binary");
+
+    // Check size
+    spdlog::info("ImageDecoder: Binary data size: {} bytes", ptr->size());
+
+    // Create wrapper directly from pointer data (no copy)
+    data_wrapper = cv::Mat(1, ptr->size(), CV_8U, ptr->data());
   }
   // 2. 回退到Base64
   else if (ctx.has("image_base64")) {
-    spdlog::debug("ImageDecoder: Getting base64 data from context...");
     std::string base64_data = ctx.get<std::string>("image_base64");
-    spdlog::debug("ImageDecoder: Base64 data size: {} bytes",
-                  base64_data.size());
-
-    // 移除data URL前缀
     std::string pure_base64 = base64::strip_data_url(base64_data);
 
-    // Base64解码
-    spdlog::debug("ImageDecoder: Starting base64 decode...");
     try {
       decoded = base64::decode(pure_base64);
-      spdlog::debug("ImageDecoder: Decoded size: {} bytes", decoded.size());
     } catch (const std::exception &e) {
       spdlog::error("ImageDecoder: Base64 decode failed: {}", e.what());
       return false;
     }
+
+    if (decoded.empty()) {
+      spdlog::error("ImageDecoder: Image data is empty");
+      return false;
+    }
+
+    // Create wrapper from local vector
+    data_wrapper = cv::Mat(1, decoded.size(), CV_8U, decoded.data());
   } else {
-    spdlog::error(
-        "ImageDecoder: Missing image data (binary or base64) in context");
+    spdlog::error("ImageDecoder: Missing image data");
     return false;
   }
 
-  if (decoded.empty()) {
-    spdlog::error("ImageDecoder: Image data is empty");
+  // data_wrapper should be valid at this point (either from binary or base64)
+  if (data_wrapper.empty()) {
+    spdlog::error("ImageDecoder: Image data wrapper is empty");
     return false;
   }
 
-  // 解码为OpenCV图像
-  spdlog::debug("ImageDecoder: Running cv::imdecode...");
-  ctx.frame = cv::imdecode(decoded, cv::IMREAD_COLOR);
+  // Decode
+  try {
+    ctx.frame = cv::imdecode(data_wrapper, cv::IMREAD_COLOR);
+  } catch (const std::exception &e) {
+    spdlog::error("ImageDecoder: imdecode failed: {}", e.what());
+    return false;
+  }
 
   if (ctx.frame.empty()) {
     spdlog::error("ImageDecoder: Failed to decode image");

@@ -119,8 +119,24 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
     socket_data->waiting_for_image = false;
     json request = socket_data->pending_header;
 
-    // 复制二进制数据 (必须立即复制，因为message在返回后失效)
-    std::vector<uint8_t> image_data(message.begin(), message.end());
+    // Log
+    spdlog::info("Binary message: ptr={}, size={}", (void *)message.data(),
+                 message.size());
+
+    if (message.size() > 100 * 1024 * 1024) {
+      spdlog::error("Binary message too large: {}", message.size());
+      return;
+    }
+
+    // 复制二进制数据 (使用shared_ptr避免拷贝)
+    auto image_data = std::make_shared<std::vector<uint8_t>>();
+    try {
+      image_data->assign(message.begin(), message.end());
+    } catch (const std::exception &e) {
+      spdlog::error("Vector allocation failed: size={}, error={}",
+                    message.size(), e.what());
+      return;
+    }
 
     // 投入线程池执行推理
     pool_.enqueue([this, ws, socket_data, loop, request, image_data]() {
