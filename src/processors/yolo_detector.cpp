@@ -103,8 +103,8 @@ void YoloDetector::load_model() {
       spdlog::info("YoloDetector: Input {} name acquired: {}", i, name.get());
       spdlog::default_logger()->flush();
 
-      auto shape_info =
-          ort_->session->GetInputTypeInfo(i).GetTensorTypeAndShapeInfo();
+      auto type_info = ort_->session->GetInputTypeInfo(i);
+      auto shape_info = type_info.GetTensorTypeAndShapeInfo();
       spdlog::info("YoloDetector: Input {} shape info retrieved", i);
       spdlog::default_logger()->flush();
 
