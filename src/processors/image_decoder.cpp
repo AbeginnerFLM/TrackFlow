@@ -53,6 +53,17 @@ bool ImageDecoder::process(ProcessingContext &ctx) {
     ctx.frame = cv::imdecode(data_wrapper, cv::IMREAD_COLOR);
     if (ctx.frame.empty()) {
       spdlog::error("ImageDecoder: Failed to decode image");
+      std::cerr << "DEBUG_TRACE: ImageDecoder failed to decode. Input size="
+                << data_wrapper.cols << std::endl;
+      // Print first few bytes for debugging
+      if (data_wrapper.cols > 0) {
+        uint8_t *ptr = data_wrapper.ptr<uint8_t>(0);
+        std::cerr << "DEBUG_TRACE: First 10 bytes: ";
+        for (int i = 0; i < std::min(10, data_wrapper.cols); ++i) {
+          std::cerr << std::hex << (int)ptr[i] << " ";
+        }
+        std::cerr << std::dec << std::endl;
+      }
       return false;
     }
 

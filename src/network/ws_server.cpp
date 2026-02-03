@@ -212,6 +212,11 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
         std::cerr << "DEBUG_TRACE: Pipeline finished. Success=" << success
                   << std::endl;
 
+        if (!success) {
+          std::cerr << "DEBUG_TRACE: Pipeline execution FAILED for session "
+                    << ctx.session_id << std::endl;
+        }
+
         response = build_response(ctx, request, success);
 
       } catch (const std::exception &e) {
