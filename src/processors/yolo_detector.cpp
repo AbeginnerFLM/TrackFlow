@@ -152,11 +152,20 @@ bool YoloDetector::process(ProcessingContext &ctx) {
   using Clock = std::chrono::high_resolution_clock;
   auto start = Clock::now();
 
+  spdlog::info("YoloDetector: Starting preprocess...");
+  spdlog::default_logger()->flush();
+
   // 预处理
   cv::Mat blob = preprocess(ctx.frame);
 
+  spdlog::info("YoloDetector: Preprocess complete. Starting inference...");
+  spdlog::default_logger()->flush();
+
   // 推理
   auto outputs = infer(blob);
+
+  spdlog::info("YoloDetector: Inference complete. Starting postprocess...");
+  spdlog::default_logger()->flush();
 
   // 后处理
   ctx.detections = postprocess(outputs, ctx.frame.size());
@@ -167,6 +176,7 @@ bool YoloDetector::process(ProcessingContext &ctx) {
 
   spdlog::debug("YoloDetector: Found {} objects in {:.2f}ms",
                 ctx.detections.size(), ctx.infer_time_ms);
+  spdlog::default_logger()->flush();
 
   return true;
 }

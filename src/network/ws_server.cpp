@@ -120,8 +120,9 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
     json request = socket_data->pending_header;
 
     // Log
-    spdlog::info("Binary message: ptr={}, size={}", (void *)message.data(),
-                 message.size());
+    spdlog::info("Binary message received: ptr={}, size={}",
+                 (void *)message.data(), message.size());
+    spdlog::default_logger()->flush();
 
     if (message.size() > 100 * 1024 * 1024) {
       spdlog::error("Binary message too large: {}", message.size());
@@ -129,16 +130,26 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
     }
 
     // 复制二进制数据 (使用shared_ptr避免拷贝)
+    spdlog::info("Allocating shared_ptr vector...");
+    spdlog::default_logger()->flush();
     auto image_data = std::make_shared<std::vector<uint8_t>>();
     try {
+      spdlog::info("Assigning data to vector (size={})...", message.size());
+      spdlog::default_logger()->flush();
       image_data->assign(message.begin(), message.end());
+      spdlog::info("Vector assignment complete. Vector size: {}",
+                   image_data->size());
+      spdlog::default_logger()->flush();
     } catch (const std::exception &e) {
       spdlog::error("Vector allocation failed: size={}, error={}",
                     message.size(), e.what());
+      spdlog::default_logger()->flush();
       return;
     }
 
     // 投入线程池执行推理
+    spdlog::info("Enqueuing task to thread pool...");
+    spdlog::default_logger()->flush();
     pool_.enqueue([this, ws, socket_data, loop, request, image_data]() {
       ProcessingContext ctx;
       json response;
