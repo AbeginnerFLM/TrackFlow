@@ -110,6 +110,8 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
   // 1. 处理二进制消息 (图片数据)
   // ==========================================================================
   if (is_binary) {
+    std::cerr << "DEBUG: Binary message received. Size=" << message.size()
+              << std::endl;
     if (!socket_data->waiting_for_image) {
       spdlog::warn("Received unexpected binary message");
       return;
