@@ -453,8 +453,9 @@ float rotated_iou(const cv::RotatedRect &a, const cv::RotatedRect &b) {
   }
 
   // 计算交集多边形面积
-  cv::convexHull(inter_pts, inter_pts);
-  float inter_area = static_cast<float>(cv::contourArea(inter_pts));
+  std::vector<cv::Point2f> hull_pts;
+  cv::convexHull(inter_pts, hull_pts);
+  float inter_area = static_cast<float>(cv::contourArea(hull_pts));
 
   // 计算并集面积
   float area_a = a.size.width * a.size.height;
