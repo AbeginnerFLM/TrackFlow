@@ -336,14 +336,23 @@ json WebSocketServer::build_response(const ProcessingContext &ctx,
   // 检测结果
   json detections = json::array();
   for (const auto &det : ctx.detections) {
-    json det_json = {{"track_id", det.track_id},
-                     {"class_id", det.class_id},
-                     {"class_name", det.class_name},
-                     {"confidence", det.confidence},
-                     {"bbox",
-                      {{"center", {det.obb.center.x, det.obb.center.y}},
-                       {"size", {det.obb.size.width, det.obb.size.height}},
-                       {"angle", det.obb.angle}}}};
+    json det_json = {
+        {"track_id", det.track_id},     {"class_id", det.class_id},
+        {"class_name", det.class_name}, {"confidence", det.confidence},
+        {"class_name", det.class_name}, {"confidence", det.confidence}};
+
+    // OBB points (8 floats)
+    cv::Point2f pts[4];
+    det.obb.points(pts);
+    det_json["obb"] = {pts[0].x, pts[0].y, pts[1].x, pts[1].y,
+                       pts[2].x, pts[2].y, pts[3].x, pts[3].y};
+
+    // HBB (x, y, w, h)
+    cv::Rect rect = det.obb.boundingRect();
+    det_json["bbox"] = {rect.x, rect.y, rect.width, rect.height};
+
+    // Angle
+    det_json["angle"] = det.obb.angle;
 
     // 可选地理坐标
     if (det.ground_x.has_value()) {

@@ -2,6 +2,7 @@
 #include "core/processor_factory.hpp"
 #include "utils/base64.hpp"
 #include <chrono>
+#include <iostream>
 #include <opencv2/imgcodecs.hpp>
 #include <spdlog/spdlog.h>
 
