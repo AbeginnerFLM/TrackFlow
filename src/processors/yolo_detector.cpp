@@ -74,8 +74,9 @@ void YoloDetector::load_model() {
     session_options.SetGraphOptimizationLevel(
         GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-    // 尝试使用CUDA
-    if (use_cuda_) {
+    // 尝试使用CUDA - 暂时禁用，因为CUDA库(libcublasLt.so.11)缺失会导致段错误
+    // TODO: 安装正确的CUDA工具包后重新启用
+    if (false && use_cuda_) { // 强制禁用CUDA
       try {
         OrtCUDAProviderOptions cuda_options;
         cuda_options.device_id = 0;
@@ -86,6 +87,8 @@ void YoloDetector::load_model() {
             "YoloDetector: CUDA not available, falling back to CPU: {}",
             e.what());
       }
+    } else {
+      spdlog::info("YoloDetector: Using CPU execution provider");
     }
 
     // 创建Session
