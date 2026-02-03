@@ -16,6 +16,8 @@ struct WebSocketServer::Impl {
 // Socket附加数据
 struct PerSocketData {
   std::string session_id;
+  bool waiting_for_image = false;
+  json pending_header;
 };
 
 // ============================================================================
@@ -61,14 +63,7 @@ void WebSocketServer::run() {
            // 收到消息
            .message =
                [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
-                 if (opCode != uWS::OpCode::TEXT) {
-                   spdlog::warn("Received non-text message, ignoring");
-                   return;
-                 }
-
-                 // 复制消息内容 (因为要传入线程池)
-                 std::string msg_copy(message);
-                 handle_message(ws, msg_copy);
+                 handle_message(ws, message, opCode == uWS::OpCode::BINARY);
                },
 
            // 连接关闭
@@ -105,104 +100,153 @@ void WebSocketServer::stop() {
 // ============================================================================
 // 消息处理
 // ============================================================================
-void WebSocketServer::handle_message(void *ws_ptr, const std::string &message) {
+void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
+                                     bool is_binary) {
   auto *ws = static_cast<uWS::WebSocket<false, true, PerSocketData> *>(ws_ptr);
   auto *socket_data = ws->getUserData();
   auto *loop = impl_->loop;
 
-  // 投入线程池处理 (不阻塞IO线程)
-  pool_.enqueue([this, ws, socket_data, loop, message]() {
-    json response;
+  // ==========================================================================
+  // 1. 处理二进制消息 (图片数据)
+  // ==========================================================================
+  if (is_binary) {
+    if (!socket_data->waiting_for_image) {
+      spdlog::warn("Received unexpected binary message");
+      return;
+    }
 
-    try {
-      // 解析请求
-      json request = json::parse(message);
+    // 重置状态
+    socket_data->waiting_for_image = false;
+    json request = socket_data->pending_header;
 
-      std::string request_id = request.value("request_id", "");
-      std::string request_type = request.value("type", "infer");
+    // 复制二进制数据 (必须立即复制，因为message在返回后失效)
+    std::vector<uint8_t> image_data(message.begin(), message.end());
 
-      if (request_type == "ping") {
-        // 心跳
-        response = {{"type", "pong"}, {"request_id", request_id}};
-      } else if (request_type == "infer") {
-        // 推理请求
-        spdlog::debug("Processing infer request...");
+    // 投入线程池执行推理
+    pool_.enqueue([this, ws, socket_data, loop, request, image_data]() {
+      ProcessingContext ctx;
+      json response;
 
-        // 获取或创建Session (每个session有独立的有状态处理器)
-        std::string session_id =
-            request.value("session_id", socket_data->session_id);
-        spdlog::debug("Session ID: {}", session_id);
+      try {
+        std::string request_id = request.value("request_id", "");
 
-        // 创建Pipeline配置
+        // 准备上下文
+        ctx.request_id = request_id;
+        ctx.session_id = request.value("session_id", socket_data->session_id);
+        ctx.frame_id = request.value("frame_id", 0);
+
+        // **关键修改**: 直接放入二进制数据，而不是base64字符串
+        // 我们利用 std::any 存储 vector<uint8_t>
+        ctx.set("image_binary", image_data);
+
+        // 获取Session
         json pipeline_config;
         if (request.contains("pipeline")) {
           pipeline_config = request;
         } else {
-          // 默认Pipeline
           pipeline_config = {
               {"pipeline", {"decoder", "yolo", "tracker"}},
               {"config", request.value("config", json::object())}};
         }
-        spdlog::debug("Pipeline config created");
 
-        // 获取或创建Session
-        auto &session = sessions_.get_or_create(session_id, pipeline_config);
-        spdlog::debug("Session ready");
-
-        // 创建处理上下文
-        ProcessingContext ctx;
-        ctx.frame_id = request.value("frame_id", 0);
-        ctx.session_id = session_id;
-        ctx.request_id = request_id;
-        spdlog::debug("Context created for frame {}", ctx.frame_id);
-
-        // 设置图像数据
-        if (request.contains("image")) {
-          spdlog::debug("Extracting image from request...");
-          // 获取图像字符串的大小
-          if (request["image"].is_string()) {
-            size_t img_size = request["image"].get<std::string_view>().size();
-            spdlog::debug("Image field size: {} bytes", img_size);
-          }
-          spdlog::debug("Setting image_base64 in context...");
-          ctx.set("image_base64", request["image"].get<std::string>());
-          spdlog::debug("Image set in context");
-        } else {
-          throw std::runtime_error("Missing 'image' field in request");
-        }
+        auto &session =
+            sessions_.get_or_create(ctx.session_id, pipeline_config);
 
         // 执行Pipeline
-        spdlog::debug("Starting pipeline execution...");
         bool success = session.pipeline.execute(ctx);
-        spdlog::debug("Pipeline execution complete, success={}", success);
-
-        // 构建响应
         response = build_response(ctx, request, success);
-      } else if (request_type == "reset") {
-        // 重置会话
-        std::string session_id =
-            request.value("session_id", socket_data->session_id);
-        sessions_.remove(session_id);
-        response = {{"type", "reset_ack"},
-                    {"request_id", request_id},
-                    {"session_id", session_id}};
-      } else {
-        response =
-            build_error("Unknown request type: " + request_type, request_id);
+
+      } catch (const std::exception &e) {
+        spdlog::error("Binary processing error: {}", e.what());
+        response = build_error(e.what());
       }
 
-    } catch (const json::parse_error &e) {
-      spdlog::error("JSON parse error: {}", e.what());
-      response = build_error("Invalid JSON: " + std::string(e.what()));
-    } catch (const std::exception &e) {
-      spdlog::error("Processing error: {}", e.what());
-      response = build_error(e.what());
+      // 发送响应
+      loop->defer(
+          [ws, response]() { ws->send(response.dump(), uWS::OpCode::TEXT); });
+    });
+    return;
+  }
+
+  // ==========================================================================
+  // 2. 处理文本消息 (JSON)
+  // ==========================================================================
+  try {
+    json request = json::parse(message);
+    std::string request_type = request.value("type", "infer");
+
+    // 2.1 推理头信息 (准备接收二进制图片)
+    if (request_type == "infer_header") {
+      socket_data->pending_header = request;
+      socket_data->waiting_for_image = true;
+      return; // 等待下一帧二进制数据
     }
 
-    // 回到IO线程发送响应
-    loop->defer(
-        [ws, response]() { ws->send(response.dump(), uWS::OpCode::TEXT); });
-  });
+    // 2.2 其他请求 (ping, reset, 或旧版base64 infer)
+    std::string msg_copy(message); // 复制用于异步处理
+
+    pool_.enqueue([this, ws, socket_data, loop, msg_copy]() {
+      json response;
+      try {
+        json req = json::parse(msg_copy);
+        std::string type = req.value("type", "infer");
+        std::string rid = req.value("request_id", "");
+
+        if (type == "ping") {
+          response = {{"type", "pong"}, {"request_id", rid}};
+        } else if (type == "reset") {
+          std::string sid = req.value("session_id", socket_data->session_id);
+          sessions_.remove(sid);
+          response = {
+              {"type", "reset_ack"}, {"request_id", rid}, {"session_id", sid}};
+        } else if (type == "infer") {
+          // 旧版带Base64的请求
+          // ... (现有逻辑可以简化或保留，这里简化处理)
+          // 实际上如果用户还发旧版请求，我们把ImageDecoder改了就不兼容了
+          // 所以ImageDecoder必须能同时处理 base64 和 binary
+
+          // 为了保持兼容性，我们这里暂不重写旧逻辑，
+          // 但既然我们改了ImageDecoder只接受Binary，那Base64必须在这里转码？
+          // 或者 ImageDecoder 足够聪明能检测到类型。
+          // 让我们在 ImageDecoder 里做处理。
+
+          ProcessingContext ctx;
+          ctx.request_id = rid;
+          ctx.session_id = req.value("session_id", socket_data->session_id);
+          ctx.frame_id = req.value("frame_id", 0);
+
+          if (req.contains("image")) {
+            ctx.set("image_base64", req["image"].get<std::string>());
+          }
+
+          // 获取Session (同上)
+          json pipeline_config;
+          if (req.contains("pipeline"))
+            pipeline_config = req;
+          else
+            pipeline_config = {{"pipeline", {"decoder", "yolo", "tracker"}},
+                               {"config", req.value("config", json::object())}};
+
+          auto &session =
+              sessions_.get_or_create(ctx.session_id, pipeline_config);
+          bool success = session.pipeline.execute(ctx);
+          response = build_response(ctx, req, success);
+        } else {
+          response = build_error("Unknown type: " + type, rid);
+        }
+      } catch (const std::exception &e) {
+        response = build_error(e.what());
+      }
+
+      loop->defer(
+          [ws, response]() { ws->send(response.dump(), uWS::OpCode::TEXT); });
+    });
+
+  } catch (const std::exception &e) {
+    // JSON解析失败等
+    json err = build_error("Invalid JSON: " + std::string(e.what()));
+    ws->send(err.dump(), uWS::OpCode::TEXT);
+  }
 }
 
 // ============================================================================

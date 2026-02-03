@@ -11,34 +11,40 @@ bool ImageDecoder::process(ProcessingContext &ctx) {
   using Clock = std::chrono::high_resolution_clock;
   auto start = Clock::now();
 
-  // 从上下文获取Base64图像数据
-  if (!ctx.has("image_base64")) {
-    spdlog::error("ImageDecoder: Missing 'image_base64' in context");
-    return false;
-  }
-
-  spdlog::debug("ImageDecoder: Getting base64 data from context...");
-  std::string base64_data = ctx.get<std::string>("image_base64");
-  spdlog::debug("ImageDecoder: Base64 data size: {} bytes", base64_data.size());
-
-  // 移除data URL前缀 (如 "data:image/jpeg;base64,")
-  spdlog::debug("ImageDecoder: Stripping data URL prefix...");
-  std::string pure_base64 = base64::strip_data_url(base64_data);
-  spdlog::debug("ImageDecoder: Pure base64 size: {} bytes", pure_base64.size());
-
-  // Base64解码
-  spdlog::debug("ImageDecoder: Starting base64 decode...");
   std::vector<uint8_t> decoded;
-  try {
-    decoded = base64::decode(pure_base64);
-    spdlog::debug("ImageDecoder: Decoded size: {} bytes", decoded.size());
-  } catch (const std::exception &e) {
-    spdlog::error("ImageDecoder: Base64 decode failed: {}", e.what());
+
+  // 1. 优先检查二进制数据
+  if (ctx.has("image_binary")) {
+    spdlog::debug("ImageDecoder: Using binary image data");
+    decoded = ctx.get<std::vector<uint8_t>>("image_binary");
+  }
+  // 2. 回退到Base64
+  else if (ctx.has("image_base64")) {
+    spdlog::debug("ImageDecoder: Getting base64 data from context...");
+    std::string base64_data = ctx.get<std::string>("image_base64");
+    spdlog::debug("ImageDecoder: Base64 data size: {} bytes",
+                  base64_data.size());
+
+    // 移除data URL前缀
+    std::string pure_base64 = base64::strip_data_url(base64_data);
+
+    // Base64解码
+    spdlog::debug("ImageDecoder: Starting base64 decode...");
+    try {
+      decoded = base64::decode(pure_base64);
+      spdlog::debug("ImageDecoder: Decoded size: {} bytes", decoded.size());
+    } catch (const std::exception &e) {
+      spdlog::error("ImageDecoder: Base64 decode failed: {}", e.what());
+      return false;
+    }
+  } else {
+    spdlog::error(
+        "ImageDecoder: Missing image data (binary or base64) in context");
     return false;
   }
 
   if (decoded.empty()) {
-    spdlog::error("ImageDecoder: Decoded data is empty");
+    spdlog::error("ImageDecoder: Image data is empty");
     return false;
   }
 

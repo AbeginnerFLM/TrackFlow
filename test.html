@@ -391,7 +391,7 @@
             reader.readAsDataURL(file);
         }
 
-        function sendInfer() {
+        async function sendInfer() {
             if (!ws || ws.readyState !== WebSocket.OPEN) {
                 addLog('Not connected', 'error');
                 return;
@@ -404,25 +404,41 @@
             frameId++;
             inferStartTime = performance.now();
 
-            const request = {
-                type: 'infer',
-                request_id: 'req_' + Date.now(),
-                frame_id: frameId,
-                image: currentImage,
-                config: {
-                    yolo: {
-                        model_path: 'models/yolo26.onnx',
-                        confidence: 0.5,
-                        nms_threshold: 0.45
-                    },
-                    tracker: {
-                        enabled: true
-                    }
-                }
-            };
+            try {
+                // 1. Convert Base64 (currentImage) to Binary Blob
+                const res = await fetch(currentImage);
+                const blob = await res.blob();
+                const arrayBuffer = await blob.arrayBuffer();
 
-            ws.send(JSON.stringify(request));
-            addLog(`📤 Sent inference request (frame ${frameId})`, 'info');
+                // 2. Prepare Header
+                const header = {
+                    type: 'infer_header',
+                    request_id: 'req_' + Date.now(),
+                    frame_id: frameId,
+                    config: {
+                        yolo: {
+                            model_path: 'models/yolo26.onnx',
+                            confidence: 0.5,
+                            nms_threshold: 0.45
+                        },
+                        tracker: {
+                            enabled: true
+                        }
+                    }
+                };
+
+                // 3. Send Header
+                ws.send(JSON.stringify(header));
+
+                // 4. Send Binary Data
+                ws.send(arrayBuffer);
+
+                addLog(`📤 Sent inference request (frame ${frameId}) - ${(arrayBuffer.byteLength / 1024).toFixed(1)} KB`, 'info');
+
+            } catch (e) {
+                addLog(`Error preparing request: ${e.message}`, 'error');
+                console.error(e);
+            }
         }
 
         function handleResponse(data) {

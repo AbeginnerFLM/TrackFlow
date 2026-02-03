@@ -7,6 +7,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <string_view>
 
 namespace yolo_edge {
 
@@ -43,7 +44,7 @@ public:
 
 private:
   // 处理收到的消息
-  void handle_message(void *ws, const std::string &message);
+  void handle_message(void *ws, std::string_view message, bool is_binary);
 
   // 构建响应JSON
   json build_response(const ProcessingContext &ctx, const json &request,
