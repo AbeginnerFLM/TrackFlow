@@ -118,19 +118,24 @@ void ByteTracker::reset() {
 }
 
 bool ByteTracker::process(ProcessingContext &ctx) {
-  using Clock = std::chrono::high_resolution_clock;
-  auto start = Clock::now();
+  try {
+    using Clock = std::chrono::high_resolution_clock;
+    auto start = Clock::now();
 
-  update(ctx.detections, ctx.frame_id);
+    update(ctx.detections, ctx.frame_id);
 
-  auto end = Clock::now();
-  ctx.track_time_ms =
-      std::chrono::duration<double, std::milli>(end - start).count();
+    auto end = Clock::now();
+    ctx.track_time_ms =
+        std::chrono::duration<double, std::milli>(end - start).count();
 
-  spdlog::debug("ByteTracker: Tracking {} objects in {:.2f}ms",
-                ctx.detections.size(), ctx.track_time_ms);
+    spdlog::debug("ByteTracker: Tracking {} objects in {:.2f}ms",
+                  ctx.detections.size(), ctx.track_time_ms);
 
-  return true;
+    return true;
+  } catch (const std::exception &e) {
+    spdlog::error("ByteTracker: Exception in process: {}", e.what());
+    return false;
+  }
 }
 
 void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {

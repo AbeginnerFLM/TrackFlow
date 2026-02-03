@@ -68,56 +68,62 @@ void YoloDetector::configure(const json &config) {
 // 加载模型
 // ============================================================================
 void YoloDetector::load_model() {
+  spdlog::info("YoloDetector: Start loading model from '{}'", model_path_);
   try {
     Ort::SessionOptions session_options;
     session_options.SetIntraOpNumThreads(1);
     session_options.SetGraphOptimizationLevel(
         GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-    // 尝试使用CUDA - 暂时禁用，因为CUDA库(libcublasLt.so.11)缺失会导致段错误
-    // TODO: 安装正确的CUDA工具包后重新启用
-    if (false && use_cuda_) { // 强制禁用CUDA
-      try {
-        OrtCUDAProviderOptions cuda_options;
-        cuda_options.device_id = 0;
-        session_options.AppendExecutionProvider_CUDA(cuda_options);
-        spdlog::info("YoloDetector: Using CUDA execution provider");
-      } catch (const Ort::Exception &e) {
-        spdlog::warn(
-            "YoloDetector: CUDA not available, falling back to CPU: {}",
-            e.what());
-      }
+    if (false && use_cuda_) {
+      // CUDA disabled
     } else {
-      spdlog::info("YoloDetector: Using CPU execution provider");
+      spdlog::info("YoloDetector: Using CPU execution provider (Explicit)");
     }
 
-    // 创建Session
+    spdlog::info("YoloDetector: Creating Ort::Session...");
     ort_->session = std::make_unique<Ort::Session>(
         ort_->env, model_path_.c_str(), session_options);
+    spdlog::info("YoloDetector: Ort::Session created successfully");
 
     Ort::AllocatorWithDefaultOptions allocator;
 
     // 获取输入信息
     size_t num_inputs = ort_->session->GetInputCount();
+    spdlog::info("YoloDetector: Model has {} inputs", num_inputs);
+
     for (size_t i = 0; i < num_inputs; ++i) {
+      spdlog::info("YoloDetector: Processing input {}", i);
+      spdlog::default_logger()->flush();
+
       auto name = ort_->session->GetInputNameAllocated(i, allocator);
       ort_->input_names_storage.push_back(name.get());
       ort_->input_names.push_back(ort_->input_names_storage.back().c_str());
 
+      spdlog::info("YoloDetector: Input {} name acquired: {}", i, name.get());
+      spdlog::default_logger()->flush();
+
       auto shape_info =
           ort_->session->GetInputTypeInfo(i).GetTensorTypeAndShapeInfo();
+      spdlog::info("YoloDetector: Input {} shape info retrieved", i);
+      spdlog::default_logger()->flush();
+
       ort_->input_shape = shape_info.GetShape();
+      spdlog::info("YoloDetector: Input {} processed", i);
     }
 
     // 获取输出信息
     size_t num_outputs = ort_->session->GetOutputCount();
+    spdlog::info("YoloDetector: Model has {} outputs", num_outputs);
+
     for (size_t i = 0; i < num_outputs; ++i) {
       auto name = ort_->session->GetOutputNameAllocated(i, allocator);
       ort_->output_names_storage.push_back(name.get());
       ort_->output_names.push_back(ort_->output_names_storage.back().c_str());
+      spdlog::info("YoloDetector: Output {} processed", i);
     }
 
-    // 更新输入尺寸 (如果模型中指定了)
+    // ... (rest is fine)
     if (ort_->input_shape.size() >= 4) {
       if (ort_->input_shape[2] > 0)
         input_height_ = ort_->input_shape[2];
@@ -130,7 +136,12 @@ void YoloDetector::load_model() {
                  input_width_, input_height_);
 
   } catch (const Ort::Exception &e) {
-    spdlog::error("YoloDetector: Failed to load model: {}", e.what());
+    spdlog::error("YoloDetector: Failed to load model (Ort::Exception): {}",
+                  e.what());
+    initialized_ = false;
+  } catch (const std::exception &e) {
+    spdlog::error("YoloDetector: Failed to load model (std::exception): {}",
+                  e.what());
     initialized_ = false;
   }
 }
@@ -139,46 +150,51 @@ void YoloDetector::load_model() {
 // 处理
 // ============================================================================
 bool YoloDetector::process(ProcessingContext &ctx) {
-  if (!initialized_) {
-    spdlog::error("YoloDetector: Model not initialized");
+  try {
+    if (!initialized_) {
+      spdlog::error("YoloDetector: Model not initialized");
+      return false;
+    }
+
+    if (ctx.frame.empty()) {
+      spdlog::error("YoloDetector: Input frame is empty");
+      return false;
+    }
+
+    using Clock = std::chrono::high_resolution_clock;
+    auto start = Clock::now();
+
+    spdlog::info("YoloDetector: Starting preprocess...");
+    spdlog::default_logger()->flush();
+
+    // 预处理
+    cv::Mat blob = preprocess(ctx.frame);
+
+    spdlog::info("YoloDetector: Preprocess complete. Starting inference...");
+    spdlog::default_logger()->flush();
+
+    // 推理
+    auto outputs = infer(blob);
+
+    spdlog::info("YoloDetector: Inference complete. Starting postprocess...");
+    spdlog::default_logger()->flush();
+
+    // 后处理
+    ctx.detections = postprocess(outputs, ctx.frame.size());
+
+    auto end = Clock::now();
+    ctx.infer_time_ms =
+        std::chrono::duration<double, std::milli>(end - start).count();
+
+    spdlog::debug("YoloDetector: Found {} objects in {:.2f}ms",
+                  ctx.detections.size(), ctx.infer_time_ms);
+    spdlog::default_logger()->flush();
+
+    return true;
+  } catch (const std::exception &e) {
+    spdlog::error("YoloDetector: Exception in process: {}", e.what());
     return false;
   }
-
-  if (ctx.frame.empty()) {
-    spdlog::error("YoloDetector: Input frame is empty");
-    return false;
-  }
-
-  using Clock = std::chrono::high_resolution_clock;
-  auto start = Clock::now();
-
-  spdlog::info("YoloDetector: Starting preprocess...");
-  spdlog::default_logger()->flush();
-
-  // 预处理
-  cv::Mat blob = preprocess(ctx.frame);
-
-  spdlog::info("YoloDetector: Preprocess complete. Starting inference...");
-  spdlog::default_logger()->flush();
-
-  // 推理
-  auto outputs = infer(blob);
-
-  spdlog::info("YoloDetector: Inference complete. Starting postprocess...");
-  spdlog::default_logger()->flush();
-
-  // 后处理
-  ctx.detections = postprocess(outputs, ctx.frame.size());
-
-  auto end = Clock::now();
-  ctx.infer_time_ms =
-      std::chrono::duration<double, std::milli>(end - start).count();
-
-  spdlog::debug("YoloDetector: Found {} objects in {:.2f}ms",
-                ctx.detections.size(), ctx.infer_time_ms);
-  spdlog::default_logger()->flush();
-
-  return true;
 }
 
 // ============================================================================
@@ -226,40 +242,45 @@ cv::Mat YoloDetector::preprocess(const cv::Mat &frame) {
 // 推理
 // ============================================================================
 std::vector<cv::Mat> YoloDetector::infer(const cv::Mat &blob) {
-  // 准备输入tensor
-  std::vector<int64_t> input_shape = {1, 3, input_height_, input_width_};
-  size_t input_size = 1 * 3 * input_height_ * input_width_;
+  try {
+    // 准备输入tensor
+    std::vector<int64_t> input_shape = {1, 3, input_height_, input_width_};
+    size_t input_size = 1 * 3 * input_height_ * input_width_;
 
-  Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-      ort_->memory_info, const_cast<float *>(blob.ptr<float>()), input_size,
-      input_shape.data(), input_shape.size());
+    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+        ort_->memory_info, const_cast<float *>(blob.ptr<float>()), input_size,
+        input_shape.data(), input_shape.size());
 
-  // 运行推理
-  auto output_tensors = ort_->session->Run(
-      Ort::RunOptions{nullptr}, ort_->input_names.data(), &input_tensor, 1,
-      ort_->output_names.data(), ort_->output_names.size());
+    // 运行推理
+    auto output_tensors = ort_->session->Run(
+        Ort::RunOptions{nullptr}, ort_->input_names.data(), &input_tensor, 1,
+        ort_->output_names.data(), ort_->output_names.size());
 
-  // 转换输出为cv::Mat
-  std::vector<cv::Mat> outputs;
-  for (auto &tensor : output_tensors) {
-    auto *data = tensor.GetTensorMutableData<float>();
-    auto shape = tensor.GetTensorTypeAndShapeInfo().GetShape();
+    // 转换输出为cv::Mat
+    std::vector<cv::Mat> outputs;
+    for (auto &tensor : output_tensors) {
+      auto *data = tensor.GetTensorMutableData<float>();
+      auto shape = tensor.GetTensorTypeAndShapeInfo().GetShape();
 
-    // 假设输出是 [1, num_features, num_boxes] 或 [1, num_boxes, num_features]
-    if (shape.size() == 3) {
-      int dim1 = shape[1];
-      int dim2 = shape[2];
-      cv::Mat mat(dim1, dim2, CV_32F, data);
-      outputs.push_back(mat.clone());
-    } else if (shape.size() == 2) {
-      int dim1 = shape[0];
-      int dim2 = shape[1];
-      cv::Mat mat(dim1, dim2, CV_32F, data);
-      outputs.push_back(mat.clone());
+      // 假设输出是 [1, num_features, num_boxes] 或 [1, num_boxes, num_features]
+      if (shape.size() == 3) {
+        int dim1 = shape[1];
+        int dim2 = shape[2];
+        cv::Mat mat(dim1, dim2, CV_32F, data);
+        outputs.push_back(mat.clone());
+      } else if (shape.size() == 2) {
+        int dim1 = shape[0];
+        int dim2 = shape[1];
+        cv::Mat mat(dim1, dim2, CV_32F, data);
+        outputs.push_back(mat.clone());
+      }
     }
-  }
 
-  return outputs;
+    return outputs;
+  } catch (const std::exception &e) {
+    spdlog::error("YoloDetector: Exception in infer: {}", e.what());
+    throw; // Rethrow to let caller handle (but now we logged it)
+  }
 }
 
 // ============================================================================
@@ -268,129 +289,154 @@ std::vector<cv::Mat> YoloDetector::infer(const cv::Mat &blob) {
 std::vector<Detection>
 YoloDetector::postprocess(const std::vector<cv::Mat> &outputs,
                           const cv::Size &original_size) {
-  if (outputs.empty()) {
-    return {};
-  }
+  try {
+    if (outputs.empty()) {
+      return {};
+    }
 
-  std::vector<Detection> detections;
-  std::vector<cv::RotatedRect> boxes;
-  std::vector<float> confidences;
-  std::vector<int> class_ids;
+    std::vector<Detection> detections;
+    std::vector<cv::RotatedRect> boxes;
+    std::vector<float> confidences;
+    std::vector<int> class_ids;
 
-  cv::Mat output = outputs[0];
+    cv::Mat output = outputs[0];
 
-  // YOLOv8-OBB输出格式: [1, num_features, num_boxes]
-  // num_features = 4 (x,y,w,h) + num_classes + 1 (angle)
-  // 需要转置
-  if (output.rows < output.cols) {
-    output = output.t();
-  }
+    // YOLOv8-OBB输出格式: [1, num_features, num_boxes]
+    // num_features = 4 (x,y,w,h) + num_classes + 1 (angle)
+    // 需要转置
+    if (output.rows < output.cols) {
+      output = output.t();
+    }
 
-  int num_boxes = output.rows;
-  int num_features = output.cols;
+    int num_boxes = output.rows;
+    int num_features = output.cols;
 
-  spdlog::info("YoloDetector: Postprocess input shape: {}x{}", num_boxes, num_features);
-  spdlog::default_logger()->flush();
+    spdlog::info("YoloDetector: Postprocess input shape: {}x{}", num_boxes,
+                 num_features);
+    spdlog::default_logger()->flush();
 
-  if (num_boxes > 100000 || num_boxes < 0) {
+    if (num_boxes > 100000 || num_boxes < 0) {
       spdlog::error("YoloDetector: Invalid number of boxes: {}", num_boxes);
       spdlog::default_logger()->flush();
       return {};
-  }
+    }
 
-  // 确定是OBB还是HBB
-  int num_classes;
-  bool has_angle = is_obb_;
-  if (has_angle) {
-    num_classes = num_features - 5; // x,y,w,h + classes + angle
-  } else {
-    num_classes = num_features - 4; // x,y,w,h + classes
-  }
-
-  if (num_classes <= 0) {
-    spdlog::warn("YoloDetector: Invalid output shape");
-    return {};
-  }
-
-  for (int i = 0; i < num_boxes; ++i) {
-    const float *row = output.ptr<float>(i);
-
-    // 解析坐标 (中心点格式)
-    float cx = row[0];
-    float cy = row[1];
-    float w = row[2];
-    float h = row[3];
-
-    // 找最大类别置信度
-    float max_conf = 0;
-    int max_class = 0;
-    for (int c = 0; c < num_classes; ++c) {
-      float conf = row[4 + c];
-      if (conf > max_conf) {
-        max_conf = conf;
-        max_class = c;
+    // Log predicted memory usage for vectors
+    try {
+      spdlog::info("YoloDetector: Preparing to reserve vectors for {} boxes",
+                   num_boxes);
+      if (num_boxes > 0) {
+        size_t required_bytes =
+            num_boxes * (sizeof(cv::RotatedRect) + sizeof(float) + sizeof(int));
+        spdlog::info("YoloDetector: Estimated temp vector memory: {} bytes",
+                     required_bytes);
       }
+    } catch (...) {
     }
 
-    if (max_conf < conf_threshold_) {
-      continue;
-    }
-
-    // 解析角度
-    float angle = 0;
-    if (has_angle && num_features > 4 + num_classes) {
-      angle = row[4 + num_classes];
-      // 转换为度数
-      angle = angle * 180.0f / static_cast<float>(CV_PI);
-    }
-
-    // 还原到原图坐标
-    cx = (cx - pad_x_) / scale_;
-    cy = (cy - pad_y_) / scale_;
-    w = w / scale_;
-    h = h / scale_;
-
-    // 边界检查
-    cx = std::clamp(cx, 0.0f, static_cast<float>(original_size.width));
-    cy = std::clamp(cy, 0.0f, static_cast<float>(original_size.height));
-
-    boxes.emplace_back(cv::Point2f(cx, cy), cv::Size2f(w, h), angle);
-    confidences.push_back(max_conf);
-    class_ids.push_back(max_class);
-  }
-
-  // NMS (对于OBB，使用旋转NMS)
-  std::vector<int> indices;
-  if (is_obb_) {
-    // 自定义旋转矩形NMS
-    indices = rotated_nms(boxes, confidences, nms_threshold_);
-  } else {
-    // 标准HBB NMS
-    std::vector<cv::Rect> hbb_boxes;
-    for (const auto &rr : boxes) {
-      hbb_boxes.push_back(rr.boundingRect());
-    }
-    cv::dnn::NMSBoxes(hbb_boxes, confidences, conf_threshold_, nms_threshold_,
-                      indices);
-  }
-
-  // 构建结果
-  for (int idx : indices) {
-    Detection det;
-    det.class_id = class_ids[idx];
-    det.confidence = confidences[idx];
-    det.obb = boxes[idx];
-
-    if (det.class_id < static_cast<int>(class_names_.size())) {
-      det.class_name = class_names_[det.class_id];
+    // 确定是OBB还是HBB
+    int num_classes;
+    bool has_angle = is_obb_;
+    if (has_angle) {
+      num_classes = num_features - 5; // x,y,w,h + classes + angle
     } else {
-      det.class_name = "class_" + std::to_string(det.class_id);
+      num_classes = num_features - 4; // x,y,w,h + classes
     }
 
-    detections.push_back(det);
-  }
+    if (num_classes <= 0) {
+      spdlog::warn("YoloDetector: Invalid output shape");
+      return {};
+    }
 
-  return detections;
+    for (int i = 0; i < num_boxes; ++i) {
+      const float *row = output.ptr<float>(i);
+
+      // 解析坐标 (中心点格式)
+      float cx = row[0];
+      float cy = row[1];
+      float w = row[2];
+      float h = row[3];
+
+      // 找最大类别置信度
+      float max_conf = 0;
+      int max_class = 0;
+      for (int c = 0; c < num_classes; ++c) {
+        float conf = row[4 + c];
+        if (conf > max_conf) {
+          max_conf = conf;
+          max_class = c;
+        }
+      }
+
+      if (max_conf < conf_threshold_) {
+        continue;
+      }
+
+      // 解析角度
+      float angle = 0;
+      if (has_angle && num_features > 4 + num_classes) {
+        angle = row[4 + num_classes];
+        // 转换为度数
+        angle = angle * 180.0f / static_cast<float>(CV_PI);
+      }
+
+      // 还原到原图坐标
+      cx = (cx - pad_x_) / scale_;
+      cy = (cy - pad_y_) / scale_;
+      w = w / scale_;
+      h = h / scale_;
+
+      // 边界检查
+      cx = std::clamp(cx, 0.0f, static_cast<float>(original_size.width));
+      cy = std::clamp(cy, 0.0f, static_cast<float>(original_size.height));
+
+      if (std::isnan(cx) || std::isnan(cy) || std::isnan(w) || std::isnan(h) ||
+          std::isnan(max_conf)) {
+        spdlog::warn("YoloDetector: Skipping detection with NaN values");
+        continue;
+      }
+
+      boxes.emplace_back(cv::Point2f(cx, cy), cv::Size2f(w, h), angle);
+      confidences.push_back(max_conf);
+      class_ids.push_back(max_class);
+    }
+
+    // NMS (对于OBB，使用旋转NMS)
+    std::vector<int> indices;
+    if (is_obb_) {
+      // 自定义旋转矩形NMS
+      indices = rotated_nms(boxes, confidences, nms_threshold_);
+    } else {
+      // 标准HBB NMS
+      std::vector<cv::Rect> hbb_boxes;
+      for (const auto &rr : boxes) {
+        hbb_boxes.push_back(rr.boundingRect());
+      }
+      cv::dnn::NMSBoxes(hbb_boxes, confidences, conf_threshold_, nms_threshold_,
+                        indices);
+    }
+
+    // 构建结果
+    for (int idx : indices) {
+      Detection det;
+      det.class_id = class_ids[idx];
+      det.confidence = confidences[idx];
+      det.obb = boxes[idx];
+
+      if (det.class_id < static_cast<int>(class_names_.size())) {
+        det.class_name = class_names_[det.class_id];
+      } else {
+        det.class_name = "class_" + std::to_string(det.class_id);
+      }
+
+      detections.push_back(det);
+    }
+
+    return detections;
+  } catch (const std::exception &e) {
+    spdlog::error("YoloDetector: Exception in postprocess: {}", e.what());
+    throw;
+  }
 }
 
 // ============================================================================

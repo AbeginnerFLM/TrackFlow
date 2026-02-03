@@ -7,9 +7,9 @@ import numpy as np
 async def test():
     uri = "ws://localhost:9001"
     async with websockets.connect(uri) as websocket:
-        # Create image
-        img = np.zeros((640, 640, 3), dtype=np.uint8)
-        _, buffer = cv2.imencode('.jpg', img)
+        # Create image 464x261
+        img = np.random.randint(0, 255, (261, 464, 3), dtype=np.uint8)
+        _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 90])
         binary_data = buffer.tobytes()
         
         print(f"Sending header...")
@@ -20,10 +20,10 @@ async def test():
             "frame_id": 1,
             "session_id": "test_session",
             "config": {
-                "tracker": {"enabled": False},
+                "tracker": {"enabled": True},
                 "yolo": {"model_path": "models/yolo26.onnx"}
             },
-            "pipeline": ["decoder"]
+            "pipeline": ["decoder", "yolo", "tracker"]
         }
         await websocket.send(json.dumps(header))
         

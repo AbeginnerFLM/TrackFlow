@@ -135,6 +135,16 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
     spdlog::info("Allocating shared_ptr vector...");
     spdlog::default_logger()->flush();
     auto image_data = std::make_shared<std::vector<uint8_t>>();
+
+    // Check max_size
+    size_t vec_max = image_data->max_size();
+    spdlog::info("Vector max_size: {}, requested: {}", vec_max, message.size());
+    if (message.size() > vec_max) {
+      spdlog::error("Requested size {} > vector max_size {}", message.size(),
+                    vec_max);
+      return;
+    }
+
     try {
       spdlog::info("Assigning data to vector (size={})...", message.size());
       spdlog::default_logger()->flush();
@@ -142,6 +152,10 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
       spdlog::info("Vector assignment complete. Vector size: {}",
                    image_data->size());
       spdlog::default_logger()->flush();
+    } catch (const std::length_error &le) {
+      spdlog::critical("Vector length_error: {}", le.what());
+      spdlog::default_logger()->flush();
+      return;
     } catch (const std::exception &e) {
       spdlog::error("Vector allocation failed: size={}, error={}",
                     message.size(), e.what());
@@ -157,6 +171,8 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
       json response;
 
       try {
+        std::cerr << "DEBUG_TRACE: Task started" << std::endl;
+
         std::string request_id = request.value("request_id", "");
 
         // 准备上下文
@@ -164,28 +180,42 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
         ctx.session_id = request.value("session_id", socket_data->session_id);
         ctx.frame_id = request.value("frame_id", 0);
 
+        std::cerr << "DEBUG_TRACE: Context prepared. ID=" << ctx.session_id
+                  << std::endl;
+
         // **关键修改**: 直接放入二进制数据，而不是base64字符串
         // 我们利用 std::any 存储 vector<uint8_t>
         ctx.set("image_binary", image_data);
 
+        std::cerr << "DEBUG_TRACE: Binary data set to context" << std::endl;
+
         // 获取Session
         json pipeline_config;
-        if (request.contains("pipeline")) {
-          pipeline_config = request;
-        } else {
-          pipeline_config = {
-              {"pipeline", {"decoder", "yolo", "tracker"}},
-              {"config", request.value("config", json::object())}};
-        }
+        // FORCE DISABLE TRACKER FOR DEBUGGING
+        // spdlog::warn("DEBUG: Forcing pipeline to ['decoder', 'yolo'] to
+        // isolate error");
+        pipeline_config = {{"pipeline", {"decoder", "yolo"}},
+                           {"config", request.value("config", json::object())}};
+
+        std::cerr << "DEBUG_TRACE: Getting session..." << std::endl;
 
         auto &session =
             sessions_.get_or_create(ctx.session_id, pipeline_config);
 
+        std::cerr
+            << "DEBUG_TRACE: Session retrieved. Starting pipeline execute..."
+            << std::endl;
+
         // 执行Pipeline
         bool success = session.pipeline.execute(ctx);
+
+        std::cerr << "DEBUG_TRACE: Pipeline finished. Success=" << success
+                  << std::endl;
+
         response = build_response(ctx, request, success);
 
       } catch (const std::exception &e) {
+        std::cerr << "DEBUG_TRACE: CAUGHT EXCEPTION: " << e.what() << std::endl;
         spdlog::error("Binary processing error: {}", e.what());
         response = build_error(e.what());
       }
@@ -204,8 +234,12 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
     json request = json::parse(message);
     std::string request_type = request.value("type", "infer");
 
+    std::cerr << "DEBUG_TRACE: Text handler. Type='" << request_type
+              << "' raw='" << message << "'" << std::endl;
+
     // 2.1 推理头信息 (准备接收二进制图片)
     if (request_type == "infer_header") {
+      std::cerr << "DEBUG_TRACE: Sync handling infer_header" << std::endl;
       socket_data->pending_header = request;
       socket_data->waiting_for_image = true;
       return; // 等待下一帧二进制数据
