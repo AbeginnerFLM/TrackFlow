@@ -289,6 +289,15 @@ YoloDetector::postprocess(const std::vector<cv::Mat> &outputs,
   int num_boxes = output.rows;
   int num_features = output.cols;
 
+  spdlog::info("YoloDetector: Postprocess input shape: {}x{}", num_boxes, num_features);
+  spdlog::default_logger()->flush();
+
+  if (num_boxes > 100000 || num_boxes < 0) {
+      spdlog::error("YoloDetector: Invalid number of boxes: {}", num_boxes);
+      spdlog::default_logger()->flush();
+      return {};
+  }
+
   // 确定是OBB还是HBB
   int num_classes;
   bool has_angle = is_obb_;
