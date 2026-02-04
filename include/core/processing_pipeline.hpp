@@ -2,7 +2,7 @@
 
 #include "image_processor.hpp"
 #include <chrono>
-#include <spdlog/spdlog.h>
+#include <cstdio>
 #include <vector>
 
 namespace yolo_edge {
@@ -30,10 +30,11 @@ public:
     auto start = Clock::now();
 
     for (auto &proc : processors_) {
-      spdlog::debug("Executing processor: {}", proc->name());
+      // fprintf(stderr, "DEBUG: Executing processor: %s\n",
+      // proc->name().c_str());
 
       if (!proc->process(ctx)) {
-        spdlog::error("Processor '{}' failed", proc->name());
+        fprintf(stderr, "Processor '%s' failed\n", proc->name().c_str());
         return false;
       }
     }
@@ -42,7 +43,8 @@ public:
     ctx.total_time_ms =
         std::chrono::duration<double, std::milli>(end - start).count();
 
-    spdlog::debug("Pipeline completed in {:.2f}ms", ctx.total_time_ms);
+    // fprintf(stderr, "DEBUG: Pipeline completed in %.2fms\n",
+    // ctx.total_time_ms);
     return true;
   }
 
