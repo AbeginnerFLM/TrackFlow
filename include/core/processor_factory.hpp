@@ -1,9 +1,10 @@
 #pragma once
 
 #include "processing_pipeline.hpp"
+#include <cstdio>
 #include <functional>
-#include <spdlog/spdlog.h>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 
 namespace yolo_edge {
@@ -31,7 +32,7 @@ public:
    * @param creator 创建函数
    */
   void register_processor(const std::string &type, Creator creator) {
-    spdlog::debug("Registering processor: {}", type);
+    // fprintf(stderr, "DEBUG: Registering processor: %s\n", type.c_str());
     creators_[type] = std::move(creator);
   }
 
@@ -96,10 +97,12 @@ public:
       }
 
       pipeline.add(create(type, merged_config));
-      spdlog::debug("Added processor '{}' to pipeline", type);
+      // fprintf(stderr, "DEBUG: Added processor '%s' to pipeline\n",
+      // type.c_str());
     }
 
-    spdlog::info("Created pipeline with {} processors", pipeline.size());
+    // fprintf(stderr, "DEBUG: Created pipeline with %zu processors\n",
+    // pipeline.size());
     return pipeline;
   }
 

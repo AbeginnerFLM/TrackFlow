@@ -3,12 +3,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <iostream>
 #include <numeric>
 #include <onnxruntime_cxx_api.h>
 #include <opencv2/dnn.hpp>
 #include <opencv2/imgproc.hpp>
-#include <spdlog/spdlog.h>
 
 namespace yolo_edge {
 
@@ -69,7 +69,8 @@ void YoloDetector::configure(const json &config) {
 // 加载模型
 // ============================================================================
 void YoloDetector::load_model() {
-  spdlog::info("YoloDetector: Start loading model from '{}'", model_path_);
+  fprintf(stderr, "[INFO] YoloDetector: Start loading model from '%s'\n",
+          model_path_.c_str());
   try {
     Ort::SessionOptions session_options;
     session_options.SetIntraOpNumThreads(1);
@@ -79,52 +80,52 @@ void YoloDetector::load_model() {
     if (false && use_cuda_) {
       // CUDA disabled
     } else {
-      spdlog::info("YoloDetector: Using CPU execution provider (Explicit)");
+      fprintf(stderr,
+              "[INFO] YoloDetector: Using CPU execution provider (Explicit)\n");
     }
 
-    spdlog::info("YoloDetector: Creating Ort::Session...");
+    fprintf(stderr, "[INFO] YoloDetector: Creating Ort::Session...\n");
     ort_->session = std::make_unique<Ort::Session>(
         ort_->env, model_path_.c_str(), session_options);
-    spdlog::info("YoloDetector: Ort::Session created successfully");
+    fprintf(stderr, "[INFO] YoloDetector: Ort::Session created successfully\n");
 
     Ort::AllocatorWithDefaultOptions allocator;
 
     // 获取输入信息
     size_t num_inputs = ort_->session->GetInputCount();
-    spdlog::info("YoloDetector: Model has {} inputs", num_inputs);
+    fprintf(stderr, "[INFO] YoloDetector: Model has %zu inputs\n", num_inputs);
 
     for (size_t i = 0; i < num_inputs; ++i) {
-      spdlog::info("YoloDetector: Processing input {}", i);
-      spdlog::default_logger()->flush();
+      fprintf(stderr, "[INFO] YoloDetector: Processing input %zu\n", i);
 
       auto name = ort_->session->GetInputNameAllocated(i, allocator);
       ort_->input_names_storage.push_back(name.get());
       ort_->input_names.push_back(ort_->input_names_storage.back().c_str());
 
-      spdlog::info("YoloDetector: Input {} name acquired: {}", i, name.get());
-      spdlog::default_logger()->flush();
+      fprintf(stderr, "[INFO] YoloDetector: Input %zu name acquired: %s\n", i,
+              name.get());
 
       auto type_info = ort_->session->GetInputTypeInfo(i);
       auto shape_info = type_info.GetTensorTypeAndShapeInfo();
-      spdlog::info("YoloDetector: Input {} shape info retrieved", i);
-      spdlog::default_logger()->flush();
+      fprintf(stderr, "[INFO] YoloDetector: Input %zu shape info retrieved\n",
+              i);
 
       ort_->input_shape = shape_info.GetShape();
-      spdlog::info("YoloDetector: Input {} processed", i);
+      fprintf(stderr, "[INFO] YoloDetector: Input %zu processed\n", i);
     }
 
     // 获取输出信息
     size_t num_outputs = ort_->session->GetOutputCount();
-    spdlog::info("YoloDetector: Model has {} outputs", num_outputs);
+    fprintf(stderr, "[INFO] YoloDetector: Model has %zu outputs\n",
+            num_outputs);
 
     for (size_t i = 0; i < num_outputs; ++i) {
       auto name = ort_->session->GetOutputNameAllocated(i, allocator);
       ort_->output_names_storage.push_back(name.get());
       ort_->output_names.push_back(ort_->output_names_storage.back().c_str());
-      spdlog::info("YoloDetector: Output {} processed", i);
+      fprintf(stderr, "[INFO] YoloDetector: Output %zu processed\n", i);
     }
 
-    // ... (rest is fine)
     if (ort_->input_shape.size() >= 4) {
       if (ort_->input_shape[2] > 0)
         input_height_ = ort_->input_shape[2];
@@ -133,16 +134,18 @@ void YoloDetector::load_model() {
     }
 
     initialized_ = true;
-    spdlog::info("YoloDetector: Loaded model '{}' (input: {}x{})", model_path_,
-                 input_width_, input_height_);
+    fprintf(stderr, "[INFO] YoloDetector: Loaded model '%s' (input: %dx%d)\n",
+            model_path_.c_str(), input_width_, input_height_);
 
   } catch (const Ort::Exception &e) {
-    spdlog::error("YoloDetector: Failed to load model (Ort::Exception): {}",
-                  e.what());
+    fprintf(stderr,
+            "[ERROR] YoloDetector: Failed to load model (Ort::Exception): %s\n",
+            e.what());
     initialized_ = false;
   } catch (const std::exception &e) {
-    spdlog::error("YoloDetector: Failed to load model (std::exception): {}",
-                  e.what());
+    fprintf(stderr,
+            "[ERROR] YoloDetector: Failed to load model (std::exception): %s\n",
+            e.what());
     initialized_ = false;
   }
 }
@@ -153,32 +156,31 @@ void YoloDetector::load_model() {
 bool YoloDetector::process(ProcessingContext &ctx) {
   try {
     if (!initialized_) {
-      spdlog::error("YoloDetector: Model not initialized");
+      fprintf(stderr, "[ERROR] YoloDetector: Model not initialized\n");
       return false;
     }
 
     if (ctx.frame.empty()) {
-      spdlog::error("YoloDetector: Input frame is empty");
+      fprintf(stderr, "[ERROR] YoloDetector: Input frame is empty\n");
       return false;
     }
 
     using Clock = std::chrono::high_resolution_clock;
     auto start = Clock::now();
 
-    spdlog::info("YoloDetector: Starting preprocess...");
-    spdlog::default_logger()->flush();
+    // fprintf(stderr, "[INFO] YoloDetector: Starting preprocess...\n");
 
     // 预处理
     cv::Mat blob = preprocess(ctx.frame);
 
-    spdlog::info("YoloDetector: Preprocess complete. Starting inference...");
-    spdlog::default_logger()->flush();
+    // fprintf(stderr, "[INFO] YoloDetector: Preprocess complete. Starting
+    // inference...\n");
 
     // 推理
     auto outputs = infer(blob);
 
-    spdlog::info("YoloDetector: Inference complete. Starting postprocess...");
-    spdlog::default_logger()->flush();
+    // fprintf(stderr, "[INFO] YoloDetector: Inference complete. Starting
+    // postprocess...\n");
 
     // 后处理
     ctx.detections = postprocess(outputs, ctx.frame.size());
@@ -187,13 +189,13 @@ bool YoloDetector::process(ProcessingContext &ctx) {
     ctx.infer_time_ms =
         std::chrono::duration<double, std::milli>(end - start).count();
 
-    spdlog::debug("YoloDetector: Found {} objects in {:.2f}ms",
-                  ctx.detections.size(), ctx.infer_time_ms);
-    spdlog::default_logger()->flush();
+    // fprintf(stderr, "[DEBUG] YoloDetector: Found %zu objects in %.2fms\n",
+    //              ctx.detections.size(), ctx.infer_time_ms);
 
     return true;
   } catch (const std::exception &e) {
-    spdlog::error("YoloDetector: Exception in process: {}", e.what());
+    fprintf(stderr, "[ERROR] YoloDetector: Exception in process: %s\n",
+            e.what());
     return false;
   }
 }
@@ -279,7 +281,7 @@ std::vector<cv::Mat> YoloDetector::infer(const cv::Mat &blob) {
 
     return outputs;
   } catch (const std::exception &e) {
-    spdlog::error("YoloDetector: Exception in infer: {}", e.what());
+    fprintf(stderr, "[ERROR] YoloDetector: Exception in infer: %s\n", e.what());
     throw; // Rethrow to let caller handle (but now we logged it)
   }
 }
@@ -312,32 +314,16 @@ YoloDetector::postprocess(const std::vector<cv::Mat> &outputs,
     int num_boxes = output.rows;
     int num_features = output.cols;
 
-    spdlog::info("YoloDetector: Postprocess input shape: {}x{}", num_boxes,
-                 num_features);
-    spdlog::default_logger()->flush();
+    // fprintf(stderr, "[INFO] YoloDetector: Postprocess input shape: %dx%d\n",
+    // num_boxes,
+    //              num_features);
 
-    // DEBUG: Print output shape
-    // std::cout << "DEBUG_SHAPE: " << num_boxes << "x" << num_features <<
-    // std::endl;
-    spdlog::info("DEBUG_SHAPE: {}x{}", num_boxes, num_features);
+    // fprintf(stderr, "[INFO] DEBUG_SHAPE: %dx%d\n", num_boxes, num_features);
 
     if (num_boxes > 100000 || num_boxes < 0) {
-      spdlog::error("YoloDetector: Invalid number of boxes: {}", num_boxes);
-      spdlog::default_logger()->flush();
+      fprintf(stderr, "[ERROR] YoloDetector: Invalid number of boxes: %d\n",
+              num_boxes);
       return {};
-    }
-
-    // Log predicted memory usage for vectors
-    try {
-      spdlog::info("YoloDetector: Preparing to reserve vectors for {} boxes",
-                   num_boxes);
-      if (num_boxes > 0) {
-        size_t required_bytes =
-            num_boxes * (sizeof(cv::RotatedRect) + sizeof(float) + sizeof(int));
-        spdlog::info("YoloDetector: Estimated temp vector memory: {} bytes",
-                     required_bytes);
-      }
-    } catch (...) {
     }
 
     // 确定是OBB还是HBB
@@ -350,8 +336,10 @@ YoloDetector::postprocess(const std::vector<cv::Mat> &outputs,
     }
 
     if (num_classes <= 0) {
-      spdlog::warn("YoloDetector: Invalid output shape");
-      return {};
+      fprintf(stderr, "[WARN] YoloDetector: Invalid output shape\n");
+      // Force 7-feature logic if matched
+      if (num_features != 7)
+        return {};
     }
 
     for (int i = 0; i < num_boxes; ++i) {
@@ -416,7 +404,8 @@ YoloDetector::postprocess(const std::vector<cv::Mat> &outputs,
 
       if (std::isnan(cx) || std::isnan(cy) || std::isnan(w) || std::isnan(h) ||
           std::isnan(max_conf)) {
-        spdlog::warn("YoloDetector: Skipping detection with NaN values");
+        // fprintf(stderr, "[WARN] YoloDetector: Skipping detection with NaN
+        // values\n");
         continue;
       }
 
@@ -427,6 +416,19 @@ YoloDetector::postprocess(const std::vector<cv::Mat> &outputs,
 
     // NMS (对于OBB，使用旋转NMS)
     std::vector<int> indices;
+    if (num_features == 7) {
+      // End-to-End model usually has NMS built-in or output is sparse.
+      // We can assume valid output or run NMS anyway if needed.
+      // The original code ran user-side NMS. We will keep it.
+      // Wait, if NMS is 'inside model' (End-to-End), usually output is already
+      // filtered. But if we parsed ALL rows, we might need simple thresholding.
+      // The loop above already thresholded by conf.
+      // Let's run NMS to be safe, assuming output might be raw candidates.
+      // Actually user said "NMS inside model".
+      // If so, output boxes should be few.
+      // But let's keep logic simple.
+    }
+
     if (is_obb_) {
       // 自定义旋转矩形NMS
       indices = rotated_nms(boxes, confidences, nms_threshold_);
@@ -458,7 +460,8 @@ YoloDetector::postprocess(const std::vector<cv::Mat> &outputs,
 
     return detections;
   } catch (const std::exception &e) {
-    spdlog::error("YoloDetector: Exception in postprocess: {}", e.what());
+    fprintf(stderr, "[ERROR] YoloDetector: Exception in postprocess: %s\n",
+            e.what());
     throw;
   }
 }
