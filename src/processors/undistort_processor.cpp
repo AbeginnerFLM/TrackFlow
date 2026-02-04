@@ -1,22 +1,23 @@
 #include "processors/undistort_processor.hpp"
 #include "core/processor_factory.hpp"
+#include <cstdio>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
-#include <spdlog/spdlog.h>
 
 namespace yolo_edge {
 
 void UndistortProcessor::configure(const json &config) {
   // 相机内参矩阵 (必须)
   if (!config.contains("camera_matrix")) {
-    spdlog::warn("UndistortProcessor: No camera_matrix provided, will skip "
-                 "undistortion");
+    fprintf(stderr, "[WARN] UndistortProcessor: No camera_matrix provided, "
+                    "will skip undistortion\n");
     return;
   }
 
   auto k_data = config["camera_matrix"].get<std::vector<double>>();
   if (k_data.size() != 9) {
-    spdlog::error("UndistortProcessor: camera_matrix must have 9 elements");
+    fprintf(stderr,
+            "[ERROR] UndistortProcessor: camera_matrix must have 9 elements\n");
     return;
   }
 
@@ -27,7 +28,7 @@ void UndistortProcessor::configure(const json &config) {
 
   // 畸变系数 (必须)
   if (!config.contains("dist_coeffs")) {
-    spdlog::error("UndistortProcessor: No dist_coeffs provided");
+    fprintf(stderr, "[ERROR] UndistortProcessor: No dist_coeffs provided\n");
     return;
   }
 
@@ -52,8 +53,8 @@ void UndistortProcessor::configure(const json &config) {
 
   initialized_ = true;
 
-  spdlog::info("UndistortProcessor: Initialized for {}x{} images", width,
-               height);
+  fprintf(stderr, "[INFO] UndistortProcessor: Initialized for %dx%d images\n",
+          width, height);
 }
 
 bool UndistortProcessor::process(ProcessingContext &ctx) {
@@ -67,7 +68,7 @@ bool UndistortProcessor::process(ProcessingContext &ctx) {
   cv::remap(ctx.frame, undistorted, map1_, map2_, cv::INTER_LINEAR);
   ctx.frame = undistorted;
 
-  spdlog::debug("UndistortProcessor: Frame undistorted");
+  // fprintf(stderr, "[DEBUG] UndistortProcessor: Frame undistorted\n");
 
   return true;
 }

@@ -3,8 +3,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <limits>
-#include <spdlog/spdlog.h>
+#include <numeric>
 
 namespace yolo_edge {
 
@@ -105,9 +106,10 @@ void ByteTracker::configure(const json &config) {
   max_time_lost_ = config.value("max_time_lost", 30);
   min_hits_ = config.value("min_hits", 3);
 
-  spdlog::debug("ByteTracker configured: track_thresh={}, high_thresh={}, "
-                "match_thresh={}",
-                track_thresh_, high_thresh_, match_thresh_);
+  fprintf(stderr,
+          "[DEBUG] ByteTracker configured: track_thresh=%.2f, "
+          "high_thresh=%.2f, match_thresh=%.2f\n",
+          track_thresh_, high_thresh_, match_thresh_);
 }
 
 void ByteTracker::reset() {
@@ -128,12 +130,13 @@ bool ByteTracker::process(ProcessingContext &ctx) {
     ctx.track_time_ms =
         std::chrono::duration<double, std::milli>(end - start).count();
 
-    spdlog::debug("ByteTracker: Tracking {} objects in {:.2f}ms",
-                  ctx.detections.size(), ctx.track_time_ms);
+    // fprintf(stderr, "[DEBUG] ByteTracker: Tracking %zu objects in %.2fms\n",
+    //               ctx.detections.size(), ctx.track_time_ms);
 
     return true;
   } catch (const std::exception &e) {
-    spdlog::error("ByteTracker: Exception in process: {}", e.what());
+    fprintf(stderr, "[ERROR] ByteTracker: Exception in process: %s\n",
+            e.what());
     return false;
   }
 }

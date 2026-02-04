@@ -2,8 +2,8 @@
 #include "core/processor_factory.hpp"
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <opencv2/calib3d.hpp>
-#include <spdlog/spdlog.h>
 
 // 包含PROJ头文件 (只在cpp中)
 #include <proj.h>
@@ -24,14 +24,15 @@ GeoTransformer::~GeoTransformer() {
 void GeoTransformer::configure(const json &config) {
   // 单应矩阵 (必须)
   if (!config.contains("homography")) {
-    spdlog::warn("GeoTransformer: No homography matrix provided, will skip "
-                 "transformation");
+    fprintf(stderr, "[WARN] GeoTransformer: No homography matrix provided, "
+                    "will skip transformation\n");
     return;
   }
 
   auto h_data = config["homography"].get<std::vector<double>>();
   if (h_data.size() != 9) {
-    spdlog::error("GeoTransformer: Homography matrix must have 9 elements");
+    fprintf(stderr,
+            "[ERROR] GeoTransformer: Homography matrix must have 9 elements\n");
     return;
   }
 
@@ -42,7 +43,8 @@ void GeoTransformer::configure(const json &config) {
 
   // 原点经纬度 (必须)
   if (!config.contains("origin_lon") || !config.contains("origin_lat")) {
-    spdlog::error("GeoTransformer: Missing origin_lon or origin_lat");
+    fprintf(stderr,
+            "[ERROR] GeoTransformer: Missing origin_lon or origin_lat\n");
     return;
   }
 
@@ -65,15 +67,16 @@ void GeoTransformer::configure(const json &config) {
       }
 
       has_camera_params_ = true;
-      spdlog::debug("GeoTransformer: Camera parameters loaded");
+      fprintf(stderr, "[DEBUG] GeoTransformer: Camera parameters loaded\n");
     }
   }
 
   init_proj();
   initialized_ = true;
 
-  spdlog::info("GeoTransformer: Configured with origin ({:.6f}, {:.6f})",
-               origin_lon_, origin_lat_);
+  fprintf(stderr,
+          "[INFO] GeoTransformer: Configured with origin (%.6f, %.6f)\n",
+          origin_lon_, origin_lat_);
 }
 
 void GeoTransformer::init_proj() {
@@ -91,7 +94,8 @@ void GeoTransformer::init_proj() {
                                  utm_def.c_str(), "EPSG:4326", nullptr);
 
   if (!proj_) {
-    spdlog::error("GeoTransformer: Failed to create PROJ transformation");
+    fprintf(stderr,
+            "[ERROR] GeoTransformer: Failed to create PROJ transformation\n");
     return;
   }
 
@@ -102,8 +106,8 @@ void GeoTransformer::init_proj() {
   origin_utm_x_ = origin_utm.xy.x;
   origin_utm_y_ = origin_utm.xy.y;
 
-  spdlog::debug("GeoTransformer: Origin UTM ({:.2f}, {:.2f}) Zone {}{}",
-                origin_utm_x_, origin_utm_y_, zone, is_north ? "N" : "S");
+  fprintf(stderr, "[DEBUG] GeoTransformer: Origin UTM (%.2f, %.2f) Zone %d%s\n",
+          origin_utm_x_, origin_utm_y_, zone, is_north ? "N" : "S");
 }
 
 std::pair<double, double> GeoTransformer::utm_to_lonlat(double easting,
@@ -158,8 +162,9 @@ bool GeoTransformer::process(ProcessingContext &ctx) {
   ctx.geo_time_ms =
       std::chrono::duration<double, std::milli>(end - start).count();
 
-  spdlog::debug("GeoTransformer: Transformed {} detections in {:.2f}ms",
-                ctx.detections.size(), ctx.geo_time_ms);
+  // fprintf(stderr, "[DEBUG] GeoTransformer: Transformed %zu detections in
+  // %.2fms\n",
+  //               ctx.detections.size(), ctx.geo_time_ms);
 
   return true;
 }
