@@ -2,7 +2,7 @@
 正确的YOLO ONNX导出脚本
 
 用法：
-    python export_onnx.py --model your_model.pt --imgsz 640
+    python export_onnx.py --model your_model.pt --imgsz 1280
 
 这个脚本确保ONNX模型的坐标输出与原始PyTorch模型一致
 """
@@ -10,7 +10,7 @@
 from ultralytics import YOLO
 import argparse
 
-def export_onnx(model_path, imgsz=640):
+def export_onnx(model_path, imgsz=1280):
     """
     导出YOLO模型为ONNX格式
     
@@ -55,7 +55,7 @@ def export_onnx(model_path, imgsz=640):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True, help="Path to .pt model")
-    parser.add_argument("--imgsz", type=int, default=640, help="Input image size")
+    parser.add_argument("--imgsz", type=int, default=1280, help="Input image size")
     
     args = parser.parse_args()
     export_onnx(args.model, args.imgsz)
