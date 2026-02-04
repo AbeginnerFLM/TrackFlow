@@ -315,9 +315,10 @@ YoloDetector::postprocess(const std::vector<cv::Mat> &outputs,
                  num_features);
     spdlog::default_logger()->flush();
 
-    // DEBUG: Force print shape to stderr/stdout
-    std::cout << "DEBUG_SHAPE: " << num_boxes << "x" << num_features
-              << std::endl;
+    // DEBUG: Print output shape
+    // std::cout << "DEBUG_SHAPE: " << num_boxes << "x" << num_features <<
+    // std::endl;
+    spdlog::info("DEBUG_SHAPE: {}x{}", num_boxes, num_features);
 
     if (num_boxes > 100000 || num_boxes < 0) {
       spdlog::error("YoloDetector: Invalid number of boxes: {}", num_boxes);
