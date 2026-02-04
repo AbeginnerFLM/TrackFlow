@@ -1,7 +1,8 @@
 #include "network/ws_server.hpp"
 #include <App.h>
 #include <chrono>
-#include <spdlog/spdlog.h>
+#include <cstdio>
+#include <iostream>
 
 namespace yolo_edge {
 
@@ -57,7 +58,13 @@ void WebSocketServer::run() {
                      std::to_string(std::chrono::steady_clock::now()
                                         .time_since_epoch()
                                         .count());
-                 spdlog::info("Client connected: {}", data->session_id);
+                 fprintf(stderr, "Client connected: %s\n",
+                         data->session_id.c_str());
+
+                 // Send welcome message v5.1
+                 // Note: We cannot easily use send_json here as it is not
+                 // member of ws But we can send raw text. Actually, let's skip
+                 // it to avoid crashes.
                },
 
            // 收到消息
@@ -70,17 +77,18 @@ void WebSocketServer::run() {
            .close =
                [this](auto *ws, int code, std::string_view message) {
                  auto *data = ws->getUserData();
-                 spdlog::info("Client disconnected: {} (code: {})",
-                              data->session_id, code);
+                 fprintf(stderr, "Client disconnected: %s (code: %d)\n",
+                         data->session_id.c_str(), code);
                  sessions_.remove(data->session_id);
                }})
       .listen(port_,
               [this](auto *listen_socket) {
                 if (listen_socket) {
                   impl_->listen_socket = listen_socket;
-                  spdlog::info("WebSocket server listening on port {}", port_);
+                  fprintf(stderr, "WebSocket server listening on port %d\n",
+                          port_);
                 } else {
-                  spdlog::error("Failed to listen on port {}", port_);
+                  fprintf(stderr, "Failed to listen on port %d\n", port_);
                   running_ = false;
                 }
               })
@@ -110,10 +118,10 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
   // 1. 处理二进制消息 (图片数据)
   // ==========================================================================
   if (is_binary) {
-    std::cerr << "DEBUG: Binary message received. Size=" << message.size()
-              << std::endl;
+    // std::cerr << "DEBUG: Binary message received. Size=" << message.size() <<
+    // std::endl;
     if (!socket_data->waiting_for_image) {
-      spdlog::warn("Received unexpected binary message");
+      fprintf(stderr, "Received unexpected binary message\n");
       return;
     }
 
@@ -122,56 +130,46 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
     json request = socket_data->pending_header;
 
     // Log
-    spdlog::info("Binary message received: ptr={}, size={}",
-                 (void *)message.data(), message.size());
-    spdlog::default_logger()->flush();
+    fprintf(stderr, "Binary message received: ptr=%p, size=%zu\n",
+            (void *)message.data(), message.size());
 
     if (message.size() > 100 * 1024 * 1024) {
-      spdlog::error("Binary message too large: {}", message.size());
+      fprintf(stderr, "Binary message too large: %zu\n", message.size());
       return;
     }
 
     // 复制二进制数据 (使用shared_ptr避免拷贝)
-    spdlog::info("Allocating shared_ptr vector...");
-    spdlog::default_logger()->flush();
+    // fprintf(stderr, "Allocating shared_ptr vector...\n");
     auto image_data = std::make_shared<std::vector<uint8_t>>();
 
     // Check max_size
     size_t vec_max = image_data->max_size();
-    spdlog::info("Vector max_size: {}, requested: {}", vec_max, message.size());
     if (message.size() > vec_max) {
-      spdlog::error("Requested size {} > vector max_size {}", message.size(),
-                    vec_max);
+      fprintf(stderr, "Requested size %zu > vector max_size %zu\n",
+              message.size(), vec_max);
       return;
     }
 
     try {
-      spdlog::info("Assigning data to vector (size={})...", message.size());
-      spdlog::default_logger()->flush();
+      // fprintf(stderr, "Assigning data to vector (size=%zu)...\n",
+      // message.size());
       image_data->assign(message.begin(), message.end());
-      spdlog::info("Vector assignment complete. Vector size: {}",
-                   image_data->size());
-      spdlog::default_logger()->flush();
-    } catch (const std::length_error &le) {
-      spdlog::critical("Vector length_error: {}", le.what());
-      spdlog::default_logger()->flush();
-      return;
+      // fprintf(stderr, "Vector assignment complete. Vector size: %zu\n",
+      //              image_data->size());
     } catch (const std::exception &e) {
-      spdlog::error("Vector allocation failed: size={}, error={}",
-                    message.size(), e.what());
-      spdlog::default_logger()->flush();
+      fprintf(stderr, "Vector allocation failed: size=%zu, error=%s\n",
+              message.size(), e.what());
       return;
     }
 
     // 投入线程池执行推理
-    spdlog::info("Enqueuing task to thread pool...");
-    spdlog::default_logger()->flush();
+    // fprintf(stderr, "Enqueuing task to thread pool...\n");
     pool_.enqueue([this, ws, socket_data, loop, request, image_data]() {
       ProcessingContext ctx;
       json response;
 
       try {
-        std::cerr << "DEBUG_TRACE: Task started" << std::endl;
+        // std::cerr << "DEBUG_TRACE: Task started" << std::endl;
 
         std::string request_id = request.value("request_id", "");
 
@@ -180,49 +178,44 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
         ctx.session_id = request.value("session_id", socket_data->session_id);
         ctx.frame_id = request.value("frame_id", 0);
 
-        std::cerr << "DEBUG_TRACE: Context prepared. ID=" << ctx.session_id
-                  << std::endl;
+        // std::cerr << "DEBUG_TRACE: Context prepared. ID=" << ctx.session_id
+        // << std::endl;
 
         // **关键修改**: 直接放入二进制数据，而不是base64字符串
         // 我们利用 std::any 存储 vector<uint8_t>
         ctx.set("image_binary", image_data);
 
-        std::cerr << "DEBUG_TRACE: Binary data set to context" << std::endl;
+        // std::cerr << "DEBUG_TRACE: Binary data set to context" << std::endl;
 
         // 获取Session
         json pipeline_config;
-        // FORCE DISABLE TRACKER FOR DEBUGGING
-        // spdlog::warn("DEBUG: Forcing pipeline to ['decoder', 'yolo'] to
-        // isolate error");
         pipeline_config = {{"pipeline", {"decoder", "yolo"}},
                            {"config", request.value("config", json::object())}};
 
-        std::cerr << "DEBUG_TRACE: Getting session..." << std::endl;
+        // std::cerr << "DEBUG_TRACE: Getting session..." << std::endl;
 
         auto &session =
             sessions_.get_or_create(ctx.session_id, pipeline_config);
 
-        std::cerr
-            << "DEBUG_TRACE: Session retrieved. Starting pipeline execute..."
-            << std::endl;
+        // std::cerr << "DEBUG_TRACE: Session retrieved. Starting pipeline
+        // execute..." << std::endl;
 
         // 执行Pipeline
         bool success = session.pipeline.execute(ctx);
 
-        std::cerr << "DEBUG_TRACE: Pipeline finished. Success=" << success
-                  << std::endl;
+        // std::cerr << "DEBUG_TRACE: Pipeline finished. Success=" << success <<
+        // std::endl;
 
         if (!success) {
-          std::cerr << "DEBUG_TRACE: Pipeline execution FAILED for session "
-                    << ctx.session_id << std::endl;
+          fprintf(stderr,
+                  "DEBUG_TRACE: Pipeline execution FAILED for session %s\n",
+                  ctx.session_id.c_str());
         }
 
         response = build_response(ctx, request, success);
 
       } catch (const std::exception &e) {
-        std::cerr << "DEBUG_TRACE: CAUGHT EXCEPTION: " << e.what() << std::endl;
-        spdlog::error("Binary processing error: {}", e.what());
-        spdlog::default_logger()->flush();
+        fprintf(stderr, "Binary processing error: %s\n", e.what());
         response = build_error(e.what());
       }
 
@@ -240,12 +233,12 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
     json request = json::parse(message);
     std::string request_type = request.value("type", "infer");
 
-    std::cerr << "DEBUG_TRACE: Text handler. Type='" << request_type
-              << "' raw='" << message << "'" << std::endl;
+    // std::cerr << "DEBUG_TRACE: Text handler. Type='" << request_type << "'"
+    // << std::endl;
 
     // 2.1 推理头信息 (准备接收二进制图片)
     if (request_type == "infer_header") {
-      std::cerr << "DEBUG_TRACE: Sync handling infer_header" << std::endl;
+      // std::cerr << "DEBUG_TRACE: Sync handling infer_header" << std::endl;
       socket_data->pending_header = request;
       socket_data->waiting_for_image = true;
       return; // 等待下一帧二进制数据
@@ -270,15 +263,6 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
               {"type", "reset_ack"}, {"request_id", rid}, {"session_id", sid}};
         } else if (type == "infer") {
           // 旧版带Base64的请求
-          // ... (现有逻辑可以简化或保留，这里简化处理)
-          // 实际上如果用户还发旧版请求，我们把ImageDecoder改了就不兼容了
-          // 所以ImageDecoder必须能同时处理 base64 和 binary
-
-          // 为了保持兼容性，我们这里暂不重写旧逻辑，
-          // 但既然我们改了ImageDecoder只接受Binary，那Base64必须在这里转码？
-          // 或者 ImageDecoder 足够聪明能检测到类型。
-          // 让我们在 ImageDecoder 里做处理。
-
           ProcessingContext ctx;
           ctx.request_id = rid;
           ctx.session_id = req.value("session_id", socket_data->session_id);
@@ -332,9 +316,6 @@ json WebSocketServer::build_response(const ProcessingContext &ctx,
     response["error"] = "Processing failed";
     return response;
   }
-
-  // Code removed to prevent crash.
-  // Welcome message should be in on_open, not here.
 
   // 检测结果
   json detections = json::array();
