@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iostream>
 #include <numeric>
 #include <onnxruntime_cxx_api.h>
 #include <opencv2/dnn.hpp>
@@ -374,9 +375,9 @@ YoloDetector::postprocess(const std::vector<cv::Mat> &outputs,
       if (num_features == 7) {
         // DEBUG: Print first detection raw values
         if (i == 0) {
-          spdlog::error("DEBUG_RAW_0: {},{},{},{},{},{},{}", row[0], row[1],
-                        row[2], row[3], row[4], row[5], row[6]);
-          spdlog::default_logger()->flush();
+          std::cout << "DEBUG_RAW_0: " << row[0] << "," << row[1] << ","
+                    << row[2] << "," << row[3] << "," << row[4] << "," << row[5]
+                    << "," << row[6] << std::endl;
         }
 
         max_conf = row[4];
