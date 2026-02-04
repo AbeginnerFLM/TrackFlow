@@ -98,10 +98,60 @@
             border-radius: 10px;
         }
 
-        #canvas {
-            max-width: 100%;
-            border-radius: 10px;
+        /* Zoom Container Styles */
+        .zoom-wrapper {
+            width: 100%;
+            height: 400px;
+            /* Fixed viewing height */
             background: #0f0f0f;
+            overflow: hidden;
+            /* Hide scrollbars, we use transform */
+            border-radius: 10px;
+            position: relative;
+            border: 1px solid #333;
+            cursor: grab;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .zoom-wrapper:active {
+            cursor: grabbing;
+        }
+
+        .zoom-content {
+            transform-origin: center center;
+            transition: transform 0.1s ease-out;
+            max-width: 100%;
+            max-height: 100%;
+            pointer-events: none;
+            /* Let clicks pass to container */
+        }
+
+        #dropZone {
+            /* Reset typical dropzone styles for the wrapper mode */
+            padding: 0;
+            border: none;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Initial state text */
+        .placeholder-text {
+            padding: 40px;
+            text-align: center;
+            border: 3px dashed #4ade80;
+            border-radius: 15px;
+            width: 90%;
+            margin: auto;
+            cursor: pointer;
+        }
+
+        #canvas {
+            /* Canvas is now a zoom-content inside a wrapper */
         }
 
         #log {
@@ -185,6 +235,48 @@
             background: rgba(0, 0, 0, 0.3);
             border-radius: 8px;
             font-size: 12px;
+            max-height: 250px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: #4ade80 rgba(0, 0, 0, 0.3);
+        }
+
+        .detection-info::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .detection-info::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.1);
+        }
+
+        .detection-info::-webkit-scrollbar-thumb {
+            background-color: #4ade80;
+            border-radius: 3px;
+        }
+
+        .det-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 4px 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            transition: background 0.2s;
+        }
+
+        .det-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .det-item:last-child {
+            border-bottom: none;
+        }
+
+        .det-tag {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 8px;
         }
     </style>
 </head>
@@ -206,9 +298,14 @@
             <div class="col">
                 <div class="panel">
                     <h3>📤 Input</h3>
-                    <div id="dropZone" onclick="document.getElementById('fileInput').click()">
-                        <p>🖼️ Drag & Drop image here</p>
-                        <p style="color:#888; font-size:12px">or click to select</p>
+                    <!-- Wrap dropzone for unified structure -->
+                    <div class="zoom-wrapper" id="inputWrapper">
+                        <div id="dropZone" style="width:100%; height:100%">
+                            <div class="placeholder-text" onclick="document.getElementById('fileInput').click()">
+                                <p>🖼️ Drag & Drop image here</p>
+                                <p style="color:#888; font-size:12px">or click to select</p>
+                            </div>
+                        </div>
                     </div>
                     <input type="file" id="fileInput" accept="image/*" onchange="handleFile(this.files[0])">
                     <div style="margin-top:15px">
@@ -221,7 +318,11 @@
             <div class="col">
                 <div class="panel">
                     <h3>📥 Result</h3>
-                    <canvas id="canvas" width="640" height="480"></canvas>
+                    <div class="zoom-wrapper" id="resultWrapper">
+                        <canvas id="canvas" class="zoom-content"></canvas>
+                    </div>
+                    <div style="font-size:11px; color:#666; margin-top:5px; text-align:center">💡 Scroll to Zoom • Drag
+                        to Pan • Double Click to Reset</div>
                     <div id="detectionInfo" class="detection-info" style="display:none"></div>
                 </div>
             </div>
@@ -260,6 +361,7 @@
         let currentImage = null;
         let frameId = 0;
         let inferStartTime = 0;
+        let uploadScale = 1.0; // Scale factor: natural / compressed
 
         const log = document.getElementById('log');
         const canvas = document.getElementById('canvas');
@@ -290,7 +392,7 @@
                 return;
             }
 
-            const url = 'ws://142.171.65.88:9001';
+            const url = 'ws://142.171.65.88:9002';
             addLog(`Connecting to ${url}...`, 'info');
 
             ws = new WebSocket(url);
@@ -372,6 +474,27 @@
                     // 压缩图片
                     const originalSize = (originalData.length / 1024).toFixed(0);
                     currentImage = compressImage(img, 1280, 0.85);
+
+                    // Calculate upload scale (Image Natural Size / Compressed Size)
+                    // compressImage logic: if (width > maxSize) width = maxSize;
+                    // We need to know the dimensions of the compressed image.
+                    // We can infer it from the same logic or load the compressed image.
+
+                    let compW = img.naturalWidth;
+                    let compH = img.naturalHeight;
+                    const maxSize = 1280;
+
+                    if (compW > maxSize || compH > maxSize) {
+                        // Simple max dimension based scaling factor
+                        uploadScale = Math.max(compW, compH) / maxSize;
+                        if (uploadScale < 1) uploadScale = 1;
+                    } else {
+                        uploadScale = 1;
+                    }
+
+                    addLog(`🔍 Scale Debug: Img=${compW}x${compH} Max=${maxSize} => Scale=${uploadScale.toFixed(4)}`, 'warn');
+                    console.log('Upload Scale:', uploadScale);
+
                     const compressedSize = (currentImage.length / 1024).toFixed(0);
 
                     dropZone.innerHTML = '';
@@ -480,10 +603,11 @@
 
         function drawDetections(detections) {
             // Redraw original image
-            const img = dropZone.querySelector('img');
+            const img = document.querySelector('#dropZone img'); // Find the uploaded image
             if (img) {
-                canvas.width = img.width;
-                canvas.height = img.height;
+                // IMPORTANT: Use natural dimensions to prevent cropping
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
                 ctx.drawImage(img, 0, 0);
             }
 
@@ -497,7 +621,9 @@
 
                 if (det.obb) {
                     // Draw OBB (rotated bounding box)
-                    const pts = det.obb;
+                    // Scale points back to original resolution
+                    const pts = det.obb.map(p => p * uploadScale);
+
                     ctx.beginPath();
                     ctx.moveTo(pts[0], pts[1]);
                     ctx.lineTo(pts[2], pts[3]);
@@ -514,7 +640,12 @@
                     ctx.fillText(label, pts[0] + 5, pts[1] - 5);
                 } else if (det.bbox) {
                     // Draw HBB (horizontal bounding box)
-                    const [x, y, w, h] = det.bbox;
+                    // Scale bbox: [x, y, w, h]
+                    const x = det.bbox[0] * uploadScale;
+                    const y = det.bbox[1] * uploadScale;
+                    const w = det.bbox[2] * uploadScale;
+                    const h = det.bbox[3] * uploadScale;
+
                     ctx.strokeRect(x, y, w, h);
 
                     // Label
@@ -526,9 +657,18 @@
                 }
 
                 // Draw track ID if available
+                // Scale text position too
                 if (det.track_id !== undefined && det.track_id >= 0) {
                     ctx.fillStyle = '#fff';
-                    ctx.fillText(`ID: ${det.track_id}`, det.bbox ? det.bbox[0] : det.obb[0], (det.bbox ? det.bbox[1] : det.obb[1]) + 15);
+                    let tx, ty;
+                    if (det.bbox) {
+                        tx = det.bbox[0] * uploadScale;
+                        ty = det.bbox[1] * uploadScale;
+                    } else {
+                        tx = det.obb[0] * uploadScale;
+                        ty = det.obb[1] * uploadScale;
+                    }
+                    ctx.fillText(`ID: ${det.track_id}`, tx, ty + 15);
                 }
             });
         }
@@ -541,14 +681,40 @@
             }
 
             info.style.display = 'block';
-            info.innerHTML = detections.map((det, i) =>
-                `<div style="margin:5px 0">
-                    <span style="color:${colors[det.class_id % colors.length]}">●</span>
-                    ${det.class_name || 'Class ' + det.class_id} 
-                    (${(det.confidence * 100).toFixed(1)}%)
-                    ${det.track_id >= 0 ? `[Track #${det.track_id}]` : ''}
-                </div>`
+
+            // 1. Counts Summary
+            const counts = {};
+            detections.forEach(d => {
+                const name = d.class_name || 'Class ' + d.class_id;
+                counts[name] = (counts[name] || 0) + 1;
+            });
+
+            let html = '<div style="margin-bottom:10px; padding-bottom:5px; border-bottom:1px solid rgba(255,255,255,0.1); font-weight:bold; color:#fff">';
+            html += Object.entries(counts).map(([name, count]) =>
+                `<span style="margin-right:15px; white-space:nowrap">${name}: <span style="color:#4ade80">${count}</span></span>`
             ).join('');
+            html += '</div>';
+
+            // 2. Detailed List
+            html += '<div style="display:flex; flex-direction:column;">';
+            html += detections.map((det, i) => {
+                const color = colors[det.class_id % colors.length];
+                const name = det.class_name || 'Class ' + det.class_id;
+                const conf = (det.confidence * 100).toFixed(1) + '%';
+                const track = det.track_id >= 0 ? `<span style="color:#888; margin-left:5px; font-size:11px">#${det.track_id}</span>` : '';
+
+                return `<div class="det-item">
+                    <div style="display:flex; align-items:center">
+                        <span class="det-tag" style="background:${color}"></span>
+                        <span style="color:#ddd">${name}</span>
+                        ${track}
+                    </div>
+                    <span style="color:${color}; font-family:monospace">${conf}</span>
+                </div>`;
+            }).join('');
+            html += '</div>';
+
+            info.innerHTML = html;
         }
 
         function clearAll() {
@@ -559,26 +725,128 @@
             document.getElementById('inferBtn').disabled = true;
         }
 
-        // Drag and drop handlers
-        dropZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            dropZone.classList.add('dragover');
-        });
+        // Initialize Zoom logic
+        function enablePanZoom(wrapperId, contentId) {
+            const wrapper = document.getElementById(wrapperId);
+            // If contentId is passed, find it, otherwise find first child
+            let content = contentId ? document.getElementById(contentId) : wrapper.firstElementChild;
 
-        dropZone.addEventListener('dragleave', () => {
-            dropZone.classList.remove('dragover');
-        });
+            // State
+            let scale = 1;
+            let pPanning = false;
+            let pointX = 0;
+            let pointY = 0;
+            let startX = 0;
+            let startY = 0;
 
-        dropZone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            dropZone.classList.remove('dragover');
-            const file = e.dataTransfer.files[0];
-            if (file && file.type.startsWith('image/')) {
-                handleFile(file);
+            function setTransform() {
+                // If content is missing (e.g. dropzone cleared), try to re-fetch
+                if (!content) content = wrapper.querySelector('.zoom-content') || wrapper.firstElementChild;
+                if (!content) return;
+                content.style.transform = `translate(${pointX}px, ${pointY}px) scale(${scale})`;
             }
-        });
 
-        addLog('Page loaded. Click "Connect" to start.', 'info');
+            // Wheel Zoom
+            wrapper.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                if (!content) return;
+
+                const xs = (e.clientX - wrapper.getBoundingClientRect().left - pointX) / scale;
+                const ys = (e.clientY - wrapper.getBoundingClientRect().top - pointY) / scale;
+
+                const delta = -e.deltaY;
+                (delta > 0) ? (scale *= 1.1) : (scale /= 1.1);
+
+                // Limit zoom
+                scale = Math.min(Math.max(0.5, scale), 10);
+
+                pointX = e.clientX - wrapper.getBoundingClientRect().left - xs * scale;
+                pointY = e.clientY - wrapper.getBoundingClientRect().top - ys * scale;
+
+                setTransform();
+            });
+
+            // Drag Pan
+            wrapper.addEventListener('mousedown', (e) => {
+                if (e.target.closest('.placeholder-text')) return; // Allow clicking placeholder
+                pPanning = true;
+                startX = e.clientX - pointX;
+                startY = e.clientY - pointY;
+                wrapper.style.cursor = 'grabbing';
+            });
+
+            window.addEventListener('mouseup', () => {
+                pPanning = false;
+                wrapper.style.cursor = 'grab';
+            });
+
+            window.addEventListener('mousemove', (e) => {
+                if (!pPanning) return;
+                e.preventDefault();
+                pointX = e.clientX - startX;
+                pointY = e.clientY - startY;
+                setTransform();
+            });
+
+            // Reset
+            wrapper.addEventListener('dblclick', () => {
+                scale = 1;
+                pointX = 0;
+                pointY = 0;
+                setTransform();
+            });
+        }
+
+        // Init zooms
+        enablePanZoom('inputWrapper', 'dropZone');
+        enablePanZoom('resultWrapper', 'canvas');
+
+
+        function handleFile(file) {
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const originalData = e.target.result;
+                const img = new Image();
+                img.onload = () => {
+                    const originalSize = (originalData.length / 1024).toFixed(0);
+                    currentImage = compressImage(img, 1280, 0.85);
+                    const compressedSize = (currentImage.length / 1024).toFixed(0);
+
+                    // Setup Input View
+                    const dropZone = document.getElementById('dropZone');
+                    dropZone.innerHTML = '';
+                    img.classList.add('zoom-content'); // Add class for zoom
+                    dropZone.appendChild(img);
+                    // Reset transform of input wrapper/dropzone? 
+                    // Actually enablePanZoom targets the dropZone DIV inside inputWrapper.
+                    // But we just replaced dropZone content. 
+                    // The 'content' in enablePanZoom('inputWrapper') is 'dropZone' div. 
+                    // So we are transforming the DIV containing the image. That works.
+
+                    // Determine scale to fit
+                    // But we want to start fit-to-screen?
+
+                    // Setup Result Canvas (using NATURAL size to avoid crop)
+                    canvas.width = img.naturalWidth;
+                    canvas.height = img.naturalHeight;
+                    // Reset styles that might conflict
+                    canvas.style.width = '';
+                    canvas.style.height = '';
+
+                    ctx.drawImage(img, 0, 0);
+
+                    document.getElementById('inferBtn').disabled = !(ws && ws.readyState === WebSocket.OPEN);
+                    addLog(`📷 Loaded: ${file.name} (${img.naturalWidth}x${img.naturalHeight})`, 'success');
+                    addLog(`📦 Stats: ${originalSize}KB → ${compressedSize}KB`, 'info');
+                };
+                img.src = originalData;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        // ... (Update drawDetections next)
     </script>
 </body>
 
