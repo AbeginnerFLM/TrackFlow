@@ -28,9 +28,8 @@
 
 #include <atomic>
 #include <csignal>
+#include <cstdio>
 #include <iostream>
-#include <spdlog/sinks/stdout_color_sinks.h>
-#include <spdlog/spdlog.h>
 
 namespace {
 
@@ -38,7 +37,7 @@ std::atomic<bool> g_running{true};
 
 void signal_handler(int signal) {
   if (signal == SIGINT || signal == SIGTERM) {
-    spdlog::info("Received signal {}, shutting down...", signal);
+    fprintf(stderr, "[INFO] Received signal %d, shutting down...\n", signal);
     g_running = false;
   }
 }
@@ -89,16 +88,10 @@ Args parse_args(int argc, char *argv[]) {
 }
 
 void setup_logging(bool verbose) {
-  auto console = spdlog::stdout_color_mt("console");
-  spdlog::set_default_logger(console);
-
+  // No-op for now using fprintf
   if (verbose) {
-    spdlog::set_level(spdlog::level::debug);
-  } else {
-    spdlog::set_level(spdlog::level::info);
+    fprintf(stderr, "[INFO] Verbose logging enabled (approximate)\n");
   }
-
-  spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
 }
 
 } // anonymous namespace
@@ -110,9 +103,9 @@ int main(int argc, char *argv[]) {
   // 设置日志
   setup_logging(args.verbose);
 
-  spdlog::info("=================================");
-  spdlog::info("  TrackFlow YOLO Edge Server");
-  spdlog::info("=================================");
+  fprintf(stderr, "=================================\n");
+  fprintf(stderr, "  TrackFlow YOLO Edge Server\n");
+  fprintf(stderr, "=================================\n");
 
   // 加载配置文件
   if (!args.config_path.empty()) {
@@ -121,26 +114,18 @@ int main(int argc, char *argv[]) {
       args.port = config.get_nested("server.port", args.port);
       args.threads = config.get_nested("server.threads", args.threads);
 
-      std::string log_level =
-          config.get_nested("logging.level", std::string("info"));
-      if (log_level == "debug") {
-        spdlog::set_level(spdlog::level::debug);
-      } else if (log_level == "warn") {
-        spdlog::set_level(spdlog::level::warn);
-      } else if (log_level == "error") {
-        spdlog::set_level(spdlog::level::err);
-      }
+      // Logging level config ignored
     } catch (const std::exception &e) {
-      spdlog::warn("Failed to load config: {}", e.what());
+      fprintf(stderr, "[WARN] Failed to load config: %s\n", e.what());
     }
   }
 
   // 显示已注册的处理器
   auto &factory = yolo_edge::ProcessorFactory::instance();
   auto types = factory.registered_types();
-  spdlog::info("Registered processors: {}", types.size());
+  fprintf(stderr, "[INFO] Registered processors: %zu\n", types.size());
   for (const auto &type : types) {
-    spdlog::debug("  - {}", type);
+    fprintf(stderr, "  - %s\n", type.c_str());
   }
 
   // 设置信号处理
@@ -148,20 +133,21 @@ int main(int argc, char *argv[]) {
   std::signal(SIGTERM, signal_handler);
 
   // 创建线程池
-  spdlog::info("Creating thread pool with {} threads", args.threads);
+  fprintf(stderr, "[INFO] Creating thread pool with %d threads\n",
+          args.threads);
   yolo_edge::ThreadPool pool(args.threads);
 
   // 创建并启动WebSocket服务器
-  spdlog::info("Starting WebSocket server on port {}", args.port);
+  fprintf(stderr, "[INFO] Starting WebSocket server on port %d\n", args.port);
   yolo_edge::WebSocketServer server(args.port, pool);
 
   try {
     server.run();
   } catch (const std::exception &e) {
-    spdlog::error("Server error: {}", e.what());
+    fprintf(stderr, "[ERROR] Server error: %s\n", e.what());
     return 1;
   }
 
-  spdlog::info("Server stopped");
+  fprintf(stderr, "[INFO] Server stopped\n");
   return 0;
 }
