@@ -333,18 +333,8 @@ json WebSocketServer::build_response(const ProcessingContext &ctx,
     return response;
   }
 
-  // 发送欢迎消息
-  // Note: This code snippet was provided by the user.
-  // It seems intended to be sent as a separate message, not part of the
-  // build_response return value, and 'send_json' is not defined here.
-  // For now, it's commented out to maintain syntactical correctness.
-  // If this is meant to be a welcome message, it should be sent upon
-  // connection.
-  json welcome;
-  welcome["type"] = "info";
-  welcome["message"] =
-      "Connected to TrackFlow Edge Server v5.0 (FINAL FIX: FORCED SCP)";
-  send_json(welcome);
+  // Code removed to prevent crash.
+  // Welcome message should be in on_open, not here.
 
   // 检测结果
   json detections = json::array();
