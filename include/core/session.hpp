@@ -2,6 +2,7 @@
 
 #include "processing_pipeline.hpp"
 #include <chrono>
+#include <cstdio>
 #include <mutex>
 #include <unordered_map>
 
@@ -59,11 +60,13 @@ public:
     }
 
     // 创建新会话
+    // Note: Implicitly depends on ProcessorFactory being available
+    // which is usually true via ws_server.hpp inclusion order
     auto pipeline = ProcessorFactory::instance().create_pipeline(config);
     auto [inserted, _] = sessions_.emplace(
         session_id, Session(session_id, std::move(pipeline), config));
 
-    spdlog::info("Created new session: {}", session_id);
+    fprintf(stderr, "[INFO] Created new session: %s\n", session_id.c_str());
     return inserted->second;
   }
 
@@ -87,7 +90,7 @@ public:
   void remove(const std::string &session_id) {
     std::lock_guard<std::mutex> lock(mutex_);
     sessions_.erase(session_id);
-    spdlog::info("Removed session: {}", session_id);
+    fprintf(stderr, "[INFO] Removed session: %s\n", session_id.c_str());
   }
 
   /**
@@ -99,7 +102,7 @@ public:
     size_t removed = 0;
     for (auto it = sessions_.begin(); it != sessions_.end();) {
       if (it->second.is_expired(timeout)) {
-        spdlog::info("Session expired: {}", it->first);
+        fprintf(stderr, "[INFO] Session expired: %s\n", it->first.c_str());
         it = sessions_.erase(it);
         ++removed;
       } else {
