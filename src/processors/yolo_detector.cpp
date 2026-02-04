@@ -69,8 +69,6 @@ void YoloDetector::configure(const json &config) {
 // 加载模型
 // ============================================================================
 void YoloDetector::load_model() {
-  fprintf(stderr, "[INFO] YoloDetector: Start loading model from '%s'\n",
-          model_path_.c_str());
   try {
     Ort::SessionOptions session_options;
     session_options.SetIntraOpNumThreads(1);
@@ -79,51 +77,33 @@ void YoloDetector::load_model() {
 
     if (false && use_cuda_) {
       // CUDA disabled
-    } else {
-      fprintf(stderr,
-              "[INFO] YoloDetector: Using CPU execution provider (Explicit)\n");
     }
 
-    fprintf(stderr, "[INFO] YoloDetector: Creating Ort::Session...\n");
     ort_->session = std::make_unique<Ort::Session>(
         ort_->env, model_path_.c_str(), session_options);
-    fprintf(stderr, "[INFO] YoloDetector: Ort::Session created successfully\n");
 
     Ort::AllocatorWithDefaultOptions allocator;
 
     // 获取输入信息
     size_t num_inputs = ort_->session->GetInputCount();
-    fprintf(stderr, "[INFO] YoloDetector: Model has %zu inputs\n", num_inputs);
 
     for (size_t i = 0; i < num_inputs; ++i) {
-      fprintf(stderr, "[INFO] YoloDetector: Processing input %zu\n", i);
-
       auto name = ort_->session->GetInputNameAllocated(i, allocator);
       ort_->input_names_storage.push_back(name.get());
       ort_->input_names.push_back(ort_->input_names_storage.back().c_str());
 
-      fprintf(stderr, "[INFO] YoloDetector: Input %zu name acquired: %s\n", i,
-              name.get());
-
       auto type_info = ort_->session->GetInputTypeInfo(i);
       auto shape_info = type_info.GetTensorTypeAndShapeInfo();
-      fprintf(stderr, "[INFO] YoloDetector: Input %zu shape info retrieved\n",
-              i);
-
       ort_->input_shape = shape_info.GetShape();
-      fprintf(stderr, "[INFO] YoloDetector: Input %zu processed\n", i);
     }
 
     // 获取输出信息
     size_t num_outputs = ort_->session->GetOutputCount();
-    fprintf(stderr, "[INFO] YoloDetector: Model has %zu outputs\n",
-            num_outputs);
 
     for (size_t i = 0; i < num_outputs; ++i) {
       auto name = ort_->session->GetOutputNameAllocated(i, allocator);
       ort_->output_names_storage.push_back(name.get());
       ort_->output_names.push_back(ort_->output_names_storage.back().c_str());
-      fprintf(stderr, "[INFO] YoloDetector: Output %zu processed\n", i);
     }
 
     if (ort_->input_shape.size() >= 4) {
