@@ -315,6 +315,10 @@ YoloDetector::postprocess(const std::vector<cv::Mat> &outputs,
                  num_features);
     spdlog::default_logger()->flush();
 
+    // DEBUG: Force print shape to stderr/stdout
+    std::cout << "DEBUG_SHAPE: " << num_boxes << "x" << num_features
+              << std::endl;
+
     if (num_boxes > 100000 || num_boxes < 0) {
       spdlog::error("YoloDetector: Invalid number of boxes: {}", num_boxes);
       spdlog::default_logger()->flush();
@@ -357,27 +361,52 @@ YoloDetector::postprocess(const std::vector<cv::Mat> &outputs,
       float w = row[2];
       float h = row[3];
 
-      // 找最大类别置信度
-      float max_conf = 0;
-      int max_class = 0;
-      for (int c = 0; c < num_classes; ++c) {
-        float conf = row[4 + c];
-        if (conf > max_conf) {
-          max_conf = conf;
-          max_class = c;
-        }
-      }
-
-      if (max_conf < conf_threshold_) {
-        continue;
-      }
-
       // 解析角度
       float angle = 0;
-      if (has_angle && num_features > 4 + num_classes) {
-        angle = row[4 + num_classes];
-        // 转换为度数
+      float max_conf = 0;
+      int max_class = 0;
+
+      // Special handling for End-to-End export (NMS inside model)
+      // Format usually: [x, y, w, h, score, class_id, angle]
+      // We assume this format if num_features is small (e.g. 7) and matches our
+      // observation
+      if (num_features == 7) {
+        // DEBUG: Print first detection raw values
+        if (i == 0) {
+          std::cout << "DEBUG_RAW_0: " << row[0] << "," << row[1] << ","
+                    << row[2] << "," << row[3] << "," << row[4] << "," << row[5]
+                    << "," << row[6] << std::endl;
+        }
+
+        max_conf = row[4];
+        max_class = static_cast<int>(row[5]);
+        angle = row[6];
+
+        if (max_conf < conf_threshold_) {
+          continue;
+        }
+        // Convert angle to degrees
         angle = angle * 180.0f / static_cast<float>(CV_PI);
+
+      } else {
+        // Standard YOLOv8 Raw Output: [x, y, w, h, class_scores..., angle]
+        for (int c = 0; c < num_classes; ++c) {
+          float conf = row[4 + c];
+          if (conf > max_conf) {
+            max_conf = conf;
+            max_class = c;
+          }
+        }
+
+        if (max_conf < conf_threshold_) {
+          continue;
+        }
+
+        if (has_angle && num_features > 4 + num_classes) {
+          angle = row[4 + num_classes];
+          // 转换为度数
+          angle = angle * 180.0f / static_cast<float>(CV_PI);
+        }
       }
 
       // 还原到原图坐标

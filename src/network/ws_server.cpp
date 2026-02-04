@@ -333,13 +333,29 @@ json WebSocketServer::build_response(const ProcessingContext &ctx,
     return response;
   }
 
+  // 发送欢迎消息
+  // Note: This code snippet was provided by the user.
+  // It seems intended to be sent as a separate message, not part of the
+  // build_response return value, and 'send_json' is not defined here.
+  // For now, it's commented out to maintain syntactical correctness.
+  // If this is meant to be a welcome message, it should be sent upon
+  // connection.
+  /*
+  json welcome;
+  welcome["type"] = "info";
+  welcome["message"] = "Connected to TrackFlow Edge Server v2.1 (Fix: End2End
+  Parsing)"; send_json(welcome);
+  */
+
   // 检测结果
   json detections = json::array();
   for (const auto &det : ctx.detections) {
     json det_json = {
-        {"track_id", det.track_id},     {"class_id", det.class_id},
-        {"class_name", det.class_name}, {"confidence", det.confidence},
-        {"class_name", det.class_name}, {"confidence", det.confidence}};
+        {"track_id", det.track_id},
+        {"class_id", det.class_id},
+        {"class_name", det.class_name},
+        {"confidence", det.confidence},
+    };
 
     // OBB points (8 floats)
     cv::Point2f pts[4];
