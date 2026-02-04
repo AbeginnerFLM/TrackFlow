@@ -2,7 +2,6 @@
 #include "core/processor_factory.hpp"
 #include "utils/base64.hpp"
 #include <chrono>
-#include <iostream>
 #include <opencv2/imgcodecs.hpp>
 #include <spdlog/spdlog.h>
 
@@ -18,16 +17,6 @@ bool ImageDecoder::process(ProcessingContext &ctx) {
 
     // 1. 优先检查二进制数据 (使用shared_ptr)
     if (ctx.has("image_binary")) {
-      // ... (existing code, implied) ...
-      // We will copy the existing logic here in the next turn if I don't use
-      // multi_replace Wait, replace_file_content replaces the WHOLE range. I
-      // need to be careful not to delete logic. I should use multi-step or just
-      // wrap the outer part. Actually, I can just wrap the whole function.
-
-      // Re-reading file content via view_file showed me the content.
-      // I'll replicate the logic carefully or use the specific inner block?
-      // No, wrapping the whole function is safer.
-
       spdlog::debug("ImageDecoder: Using binary image data (shared_ptr)");
       auto ptr = ctx.get<std::shared_ptr<std::vector<uint8_t>>>("image_binary");
       data_wrapper = cv::Mat(1, ptr->size(), CV_8U, ptr->data());
@@ -54,17 +43,6 @@ bool ImageDecoder::process(ProcessingContext &ctx) {
     ctx.frame = cv::imdecode(data_wrapper, cv::IMREAD_COLOR);
     if (ctx.frame.empty()) {
       spdlog::error("ImageDecoder: Failed to decode image");
-      std::cerr << "DEBUG_TRACE: ImageDecoder failed to decode. Input size="
-                << data_wrapper.cols << std::endl;
-      // Print first few bytes for debugging
-      if (data_wrapper.cols > 0) {
-        uint8_t *ptr = data_wrapper.ptr<uint8_t>(0);
-        std::cerr << "DEBUG_TRACE: First 10 bytes: ";
-        for (int i = 0; i < std::min(10, data_wrapper.cols); ++i) {
-          std::cerr << std::hex << (int)ptr[i] << " ";
-        }
-        std::cerr << std::dec << std::endl;
-      }
       return false;
     }
 
