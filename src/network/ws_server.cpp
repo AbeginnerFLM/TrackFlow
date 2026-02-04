@@ -340,12 +340,11 @@ json WebSocketServer::build_response(const ProcessingContext &ctx,
   // For now, it's commented out to maintain syntactical correctness.
   // If this is meant to be a welcome message, it should be sent upon
   // connection.
-  /*
   json welcome;
   welcome["type"] = "info";
-  welcome["message"] = "Connected to TrackFlow Edge Server v2.1 (Fix: End2End
-  Parsing)"; send_json(welcome);
-  */
+  welcome["message"] =
+      "Connected to TrackFlow Edge Server v5.0 (FINAL FIX: FORCED SCP)";
+  send_json(welcome);
 
   // 检测结果
   json detections = json::array();
