@@ -165,11 +165,18 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
 
     // 投入线程池执行推理
     // fprintf(stderr, "Enqueuing task to thread pool...\n");
-    pool_.enqueue([this, ws, socket_data, loop, request, image_data]() {
+    auto enqueue_time = std::chrono::steady_clock::now();
+    pool_.enqueue([this, ws, socket_data, loop, request, image_data,
+                   enqueue_time]() {
       ProcessingContext ctx;
       json response;
+      auto start_time = std::chrono::steady_clock::now();
+      long queue_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          start_time - enqueue_time)
+                          .count();
 
       try {
+        // ... (existing code)
         // std::cerr << "DEBUG_TRACE: Task started" << std::endl;
 
         std::string request_id = request.value("request_id", "");
@@ -223,6 +230,13 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
         fprintf(stderr, "Binary processing error: %s\n", e.what());
         response = build_error(e.what());
       }
+
+      auto end_time = std::chrono::steady_clock::now();
+      long proc_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         end_time - start_time)
+                         .count();
+      fprintf(stderr, "[DIAG] Frame ID=%d: Queue=%ldms, Proc=%ldms\n",
+              ctx.frame_id, queue_ms, proc_ms);
 
       // 发送响应
       loop->defer(
