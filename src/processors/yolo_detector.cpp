@@ -45,13 +45,26 @@ YoloDetector::~YoloDetector() = default;
 // 配置
 // ============================================================================
 void YoloDetector::configure(const json &config) {
+  // Debug: print full config
+  fprintf(stderr, "[DEBUG] YoloDetector::configure received config: %s\n",
+          config.dump().c_str());
+
   model_path_ = config.value("model_path", "models/yolo_obb.onnx");
   conf_threshold_ = config.value("confidence", 0.5f);
   nms_threshold_ = config.value("nms_threshold", 0.45f);
   is_obb_ = config.value("is_obb", true);
   input_width_ = config.value("input_width", 640);
   input_height_ = config.value("input_height", 640);
-  use_cuda_ = config.value("use_cuda", true);
+
+  // Explicitly check use_cuda
+  if (config.contains("use_cuda")) {
+    use_cuda_ = config["use_cuda"].get<bool>();
+    fprintf(stderr, "[DEBUG] Found use_cuda in config: %s\n",
+            use_cuda_ ? "true" : "false");
+  } else {
+    use_cuda_ = true; // Default
+    fprintf(stderr, "[DEBUG] use_cuda not in config, defaulting to true\n");
+  }
 
   // 加载类别名称
   if (config.contains("class_names")) {
@@ -69,6 +82,8 @@ void YoloDetector::configure(const json &config) {
 // 加载模型
 // ============================================================================
 void YoloDetector::load_model() {
+  fprintf(stderr, "[DEBUG] YoloDetector::load_model called. use_cuda_=%s\n",
+          use_cuda_ ? "true" : "false");
   try {
     Ort::SessionOptions session_options;
     session_options.SetIntraOpNumThreads(4);
@@ -77,6 +92,7 @@ void YoloDetector::load_model() {
 
     bool cuda_enabled = false;
     if (use_cuda_) {
+      // ... (rest of the code)
       try {
         // 配置 CUDA Execution Provider
         OrtCUDAProviderOptions cuda_options;
