@@ -187,26 +187,37 @@ bool YoloDetector::process(ProcessingContext &ctx) {
     // fprintf(stderr, "[INFO] YoloDetector: Starting preprocess...\n");
 
     // 预处理
+    auto t1 = Clock::now();
     cv::Mat blob = preprocess(ctx.frame);
+    auto t2 = Clock::now();
 
     // fprintf(stderr, "[INFO] YoloDetector: Preprocess complete. Starting
     // inference...\n");
 
     // 推理
     auto outputs = infer(blob);
+    auto t3 = Clock::now();
 
     // fprintf(stderr, "[INFO] YoloDetector: Inference complete. Starting
     // postprocess...\n");
 
     // 后处理
     ctx.detections = postprocess(outputs, ctx.frame.size());
+    auto t4 = Clock::now();
 
     auto end = Clock::now();
     ctx.infer_time_ms =
         std::chrono::duration<double, std::milli>(end - start).count();
 
-    // fprintf(stderr, "[DEBUG] YoloDetector: Found %zu objects in %.2fms\n",
-    //              ctx.detections.size(), ctx.infer_time_ms);
+    double pre_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    double infer_ms =
+        std::chrono::duration<double, std::milli>(t3 - t2).count();
+    double post_ms = std::chrono::duration<double, std::milli>(t4 - t3).count();
+
+    fprintf(
+        stderr,
+        "[DEBUG] Timing: Pre=%.2fms, Infer=%.2fms, Post=%.2fms, Total=%.2fms\n",
+        pre_ms, infer_ms, post_ms, ctx.infer_time_ms);
 
     return true;
   } catch (const std::exception &e) {
