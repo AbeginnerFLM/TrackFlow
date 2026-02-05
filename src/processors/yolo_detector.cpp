@@ -152,6 +152,14 @@ void YoloDetector::load_model() {
             "[INFO] YoloDetector: Loaded model '%s' (input: %dx%d, %s)\n",
             model_path_.c_str(), input_width_, input_height_,
             cuda_enabled ? "GPU" : "CPU");
+    // Warmup
+    if (cuda_enabled) {
+      fprintf(stderr, "[INFO] YoloDetector: Warming up CUDA engine...\n");
+      cv::Mat dummy(input_height_, input_width_, CV_8UC3, cv::Scalar(0, 0, 0));
+      cv::Mat blob = preprocess(dummy);
+      infer(blob);
+      fprintf(stderr, "[INFO] YoloDetector: Warmup complete.\n");
+    }
 
   } catch (const Ort::Exception &e) {
     fprintf(stderr,
