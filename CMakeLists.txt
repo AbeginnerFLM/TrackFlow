@@ -24,8 +24,8 @@ endif()
 find_package(OpenCV REQUIRED)
 message(STATUS "OpenCV version: ${OpenCV_VERSION}")
 
-# spdlog
-find_package(spdlog REQUIRED)
+# spdlog 已被自定义日志库替代，不再需要
+# find_package(spdlog REQUIRED)
 
 # nlohmann_json
 find_package(nlohmann_json REQUIRED)
@@ -44,7 +44,17 @@ set(ONNXRUNTIME_ROOT "${CMAKE_SOURCE_DIR}/third_party/onnxruntime" CACHE PATH "O
 
 if(EXISTS "${ONNXRUNTIME_ROOT}/include")
     set(ONNXRUNTIME_INCLUDE_DIRS "${ONNXRUNTIME_ROOT}/include")
-    set(ONNXRUNTIME_LIBRARIES "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so")
+    set(ONNXRUNTIME_LIBRARIES 
+        "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so"
+    )
+    # GPU 支持（如果存在）
+    if(EXISTS "${ONNXRUNTIME_ROOT}/lib/libonnxruntime_providers_cuda.so")
+        list(APPEND ONNXRUNTIME_LIBRARIES 
+            "${ONNXRUNTIME_ROOT}/lib/libonnxruntime_providers_cuda.so"
+            "${ONNXRUNTIME_ROOT}/lib/libonnxruntime_providers_shared.so"
+        )
+        message(STATUS "ONNX Runtime CUDA provider found")
+    endif()
     message(STATUS "ONNX Runtime found: ${ONNXRUNTIME_ROOT}")
 else()
     message(WARNING "ONNX Runtime not found at ${ONNXRUNTIME_ROOT}, YOLO detector will be disabled")
@@ -111,7 +121,6 @@ add_executable(${PROJECT_NAME} ${ALL_SOURCES})
 
 target_link_libraries(${PROJECT_NAME}
     ${OpenCV_LIBS}
-    spdlog::spdlog
     nlohmann_json::nlohmann_json
     ${PROJ_LIBRARIES}
     ${ONNXRUNTIME_LIBRARIES}

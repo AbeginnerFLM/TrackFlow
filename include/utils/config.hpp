@@ -1,8 +1,8 @@
 #pragma once
 
+#include <cstdio>
 #include <fstream>
 #include <nlohmann/json.hpp>
-#include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <string>
 
@@ -35,7 +35,7 @@ public:
       file >> config.data_;
     }
 
-    spdlog::info("Loaded config from: {}", path);
+    fprintf(stderr, "[INFO] Loaded config from: %s\n", path.c_str());
     return config;
   }
 

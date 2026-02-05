@@ -71,12 +71,30 @@ void YoloDetector::configure(const json &config) {
 void YoloDetector::load_model() {
   try {
     Ort::SessionOptions session_options;
-    session_options.SetIntraOpNumThreads(1);
+    session_options.SetIntraOpNumThreads(4);
     session_options.SetGraphOptimizationLevel(
         GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-    if (false && use_cuda_) {
-      // CUDA disabled
+    bool cuda_enabled = false;
+    if (use_cuda_) {
+      try {
+        // 配置 CUDA Execution Provider
+        OrtCUDAProviderOptions cuda_options;
+        cuda_options.device_id = 0;
+        cuda_options.arena_extend_strategy = 0; // 默认策略
+        cuda_options.gpu_mem_limit = 0;         // 无内存限制
+        cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
+        cuda_options.do_copy_in_default_stream = 1;
+
+        session_options.AppendExecutionProvider_CUDA(cuda_options);
+        cuda_enabled = true;
+        fprintf(stderr,
+                "[INFO] YoloDetector: CUDA Execution Provider configured\n");
+      } catch (const Ort::Exception &e) {
+        fprintf(stderr, "[WARN] YoloDetector: Failed to enable CUDA: %s\n",
+                e.what());
+        fprintf(stderr, "[WARN] YoloDetector: Falling back to CPU inference\n");
+      }
     }
 
     ort_->session = std::make_unique<Ort::Session>(
@@ -114,8 +132,10 @@ void YoloDetector::load_model() {
     }
 
     initialized_ = true;
-    fprintf(stderr, "[INFO] YoloDetector: Loaded model '%s' (input: %dx%d)\n",
-            model_path_.c_str(), input_width_, input_height_);
+    fprintf(stderr,
+            "[INFO] YoloDetector: Loaded model '%s' (input: %dx%d, %s)\n",
+            model_path_.c_str(), input_width_, input_height_,
+            cuda_enabled ? "GPU" : "CPU");
 
   } catch (const Ort::Exception &e) {
     fprintf(stderr,
