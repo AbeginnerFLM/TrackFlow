@@ -201,7 +201,11 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
         // execute..." << std::endl;
 
         // 执行Pipeline
-        bool success = session.pipeline.execute(ctx);
+        bool success;
+        {
+          std::lock_guard<std::mutex> lock(session.pipeline_mutex);
+          success = session.pipeline.execute(ctx);
+        }
 
         // std::cerr << "DEBUG_TRACE: Pipeline finished. Success=" << success <<
         // std::endl;
@@ -282,7 +286,11 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
 
           auto &session =
               sessions_.get_or_create(ctx.session_id, pipeline_config);
-          bool success = session.pipeline.execute(ctx);
+          bool success;
+          {
+            std::lock_guard<std::mutex> lock(session.pipeline_mutex);
+            success = session.pipeline.execute(ctx);
+          }
           response = build_response(ctx, req, success);
         } else {
           response = build_error("Unknown type: " + type, rid);

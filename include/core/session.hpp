@@ -39,6 +39,9 @@ public:
     auto now = std::chrono::steady_clock::now();
     return (now - last_active) > timeout;
   }
+
+  // Mutex for serializing pipeline execution (required for stateful trackers)
+  mutable std::mutex pipeline_mutex;
 };
 
 /**
@@ -50,24 +53,25 @@ public:
   /**
    * 获取或创建会话
    */
+  /**
+   * 获取或创建会话
+   */
   Session &get_or_create(const std::string &session_id, const json &config) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto it = sessions_.find(session_id);
     if (it != sessions_.end()) {
-      it->second.touch();
-      return it->second;
+      it->second->touch();
+      return *it->second;
     }
 
-    // 创建新会话
-    // Note: Implicitly depends on ProcessorFactory being available
-    // which is usually true via ws_server.hpp inclusion order
     auto pipeline = ProcessorFactory::instance().create_pipeline(config);
-    auto [inserted, _] = sessions_.emplace(
-        session_id, Session(session_id, std::move(pipeline), config));
+    auto session =
+        std::make_shared<Session>(session_id, std::move(pipeline), config);
+    sessions_.emplace(session_id, session);
 
     fprintf(stderr, "[INFO] Created new session: %s\n", session_id.c_str());
-    return inserted->second;
+    return *session;
   }
 
   /**
@@ -78,8 +82,8 @@ public:
 
     auto it = sessions_.find(session_id);
     if (it != sessions_.end()) {
-      it->second.touch();
-      return &it->second;
+      it->second->touch();
+      return it->second.get();
     }
     return nullptr;
   }
@@ -101,7 +105,7 @@ public:
 
     size_t removed = 0;
     for (auto it = sessions_.begin(); it != sessions_.end();) {
-      if (it->second.is_expired(timeout)) {
+      if (it->second->is_expired(timeout)) {
         fprintf(stderr, "[INFO] Session expired: %s\n", it->first.c_str());
         it = sessions_.erase(it);
         ++removed;
@@ -122,7 +126,7 @@ public:
 
 private:
   mutable std::mutex mutex_;
-  std::unordered_map<std::string, Session> sessions_;
+  std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
 };
 
 } // namespace yolo_edge
