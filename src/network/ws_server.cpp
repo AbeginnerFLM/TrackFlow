@@ -130,8 +130,9 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
     json request = socket_data->pending_header;
 
     // Log
-    fprintf(stderr, "Binary message received: ptr=%p, size=%zu\n",
-            (void *)message.data(), message.size());
+    // Log
+    // fprintf(stderr, "Binary message received: ptr=%p, size=%zu\n",
+    //        (void *)message.data(), message.size());
 
     if (message.size() > 100 * 1024 * 1024) {
       fprintf(stderr, "Binary message too large: %zu\n", message.size());

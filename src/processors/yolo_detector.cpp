@@ -222,10 +222,10 @@ bool YoloDetector::process(ProcessingContext &ctx) {
         std::chrono::duration<double, std::milli>(t3 - t2).count();
     double post_ms = std::chrono::duration<double, std::milli>(t4 - t3).count();
 
-    fprintf(
-        stderr,
-        "[DEBUG] Timing: Pre=%.2fms, Infer=%.2fms, Post=%.2fms, Total=%.2fms\n",
-        pre_ms, infer_ms, post_ms, ctx.infer_time_ms);
+    // fprintf(
+    //    stderr,
+    //    "[DEBUG] Timing: Pre=%.2fms, Infer=%.2fms, Post=%.2fms,
+    //    Total=%.2fms\n", pre_ms, infer_ms, post_ms, ctx.infer_time_ms);
 
     return true;
   } catch (const std::exception &e) {
