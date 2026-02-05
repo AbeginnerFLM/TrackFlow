@@ -61,7 +61,8 @@
 - [x] Fix coordinate scaling and ONNX parsing for generic YOLO models <!-- id: 12 -->
     - [x] Solved "Zombie Process" preventing fix from applying
     - [x] Solved "Git Pull" silent failure by using `git reset --hard`
-    - [x] Debugging remote GCC Internal Compiler Error (ICE)
+
+ Debugging remote GCC Internal Compiler Error (ICE)
     - [x] Removed `spdlog` to stabilize compiler (replaced with `fprintf`)
     - [x] Verified ONNX model output accuracy with Python script
     - [x] Identified 640x640 resolution as bottleneck for 4K detection
@@ -110,3 +111,36 @@
 - 使用 **1280×1280** 分辨率重新导出 ONNX 模型
 - C++ 后端自动识别模型输入尺寸并适配预处理
 - **结果**: 检测框紧贴车辆边缘，精度显著提升
+
+## 12. WSL GPU 推理环境配置
+**问题**:
+尽管开启了 `use_cuda`，YOLO 推理依然在 CPU 上运行。ONNX Runtime CUDA provider 初始化失败，提示缺少系统库。
+
+**诊断**:
+GPU 服务器 (RTX 4090) 的 WSL 环境中未正确安装 CUDA Toolkit 和 cuDNN 库。
+缺失的库包括: `libcudart`, `libcublas`, `libcublasLt`, `libcufft`, `libcurand`, `libcudnn`。
+
+**解决**:
+1. **代码启用 CUDA**:
+   修改 `yolo_detector.cpp`，当 `use_cuda_` 为 true 时正确添加 `OrtCUDAProviderOptions`。
+
+2. **在 GPU 服务器 (WSL) 上安装依赖**:
+   ```bash
+   # 添加 NVIDIA 仓库
+   wget https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-keyring_1.1-1_all.deb
+   sudo dpkg -i cuda-keyring_1.1-1_all.deb
+   sudo apt update
+
+   # 安装 CUDA 11.8 运行时库 (兼容 ONNX Runtime 1.17)
+   sudo apt-get install -y cuda-cudart-11-8 libcublas-11-8 libcufft-11-8 libcurand-11-8
+   
+   # 安装 cuDNN
+   sudo apt-get install -y nvidia-cudnn
+   ```
+
+3. **验证**:
+   服务启动或首次推理时的日志应显示：
+   ```
+   [INFO] YoloDetector: CUDA Execution Provider configured
+   [INFO] YoloDetector: Loaded model '...' (input: 1280x1280, GPU)
+   ```
