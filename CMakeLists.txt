@@ -101,6 +101,7 @@ set(PROCESSOR_SOURCES
     src/processors/byte_tracker.cpp
     src/processors/geo_transformer.cpp
     src/processors/undistort_processor.cpp
+    src/processors/batch_inference_engine.cpp
 )
 
 set(NETWORK_SOURCES

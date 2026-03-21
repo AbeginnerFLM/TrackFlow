@@ -14,42 +14,34 @@ namespace yolo_edge {
 // ============================================================================
 
 void STrack::init_kalman(const cv::RotatedRect &det) {
-  // 状态向量: [cx, cy, w, h, vx, vy, vw, vh]
-  // 测量向量: [cx, cy, w, h]
   kf = cv::KalmanFilter(8, 4, 0);
 
-  // 状态转移矩阵 (匀速模型)
   kf.transitionMatrix = cv::Mat::eye(8, 8, CV_32F);
-  kf.transitionMatrix.at<float>(0, 4) = 1; // cx += vx
-  kf.transitionMatrix.at<float>(1, 5) = 1; // cy += vy
-  kf.transitionMatrix.at<float>(2, 6) = 1; // w += vw
-  kf.transitionMatrix.at<float>(3, 7) = 1; // h += vh
+  kf.transitionMatrix.at<float>(0, 4) = 1;
+  kf.transitionMatrix.at<float>(1, 5) = 1;
+  kf.transitionMatrix.at<float>(2, 6) = 1;
+  kf.transitionMatrix.at<float>(3, 7) = 1;
 
-  // 测量矩阵
   kf.measurementMatrix = cv::Mat::zeros(4, 8, CV_32F);
   kf.measurementMatrix.at<float>(0, 0) = 1;
   kf.measurementMatrix.at<float>(1, 1) = 1;
   kf.measurementMatrix.at<float>(2, 2) = 1;
   kf.measurementMatrix.at<float>(3, 3) = 1;
 
-  // 过程噪声
   cv::setIdentity(kf.processNoiseCov, cv::Scalar(1e-2));
   kf.processNoiseCov.at<float>(4, 4) = 1e-1;
   kf.processNoiseCov.at<float>(5, 5) = 1e-1;
   kf.processNoiseCov.at<float>(6, 6) = 1e-2;
   kf.processNoiseCov.at<float>(7, 7) = 1e-2;
 
-  // 测量噪声
   cv::setIdentity(kf.measurementNoiseCov, cv::Scalar(1e-1));
 
-  // 后验误差协方差
   cv::setIdentity(kf.errorCovPost, cv::Scalar(1));
   kf.errorCovPost.at<float>(4, 4) = 1e4;
   kf.errorCovPost.at<float>(5, 5) = 1e4;
   kf.errorCovPost.at<float>(6, 6) = 1e4;
   kf.errorCovPost.at<float>(7, 7) = 1e4;
 
-  // 初始状态
   kf.statePost.at<float>(0) = det.center.x;
   kf.statePost.at<float>(1) = det.center.y;
   kf.statePost.at<float>(2) = det.size.width;
@@ -79,13 +71,9 @@ void STrack::update(const cv::RotatedRect &det, int frame, float conf) {
   hits++;
   time_since_update = 0;
 
-  // 更新轨迹
-  trajectory.push_back(det.center);
-  if (trajectory.size() > 100) {
-    trajectory.erase(trajectory.begin());
-  }
+  // 使用环形缓冲区 (O(1) 替代 vector erase O(N))
+  add_trajectory_point(det.center);
 
-  // 卡尔曼更新
   if (kf_initialized) {
     cv::Mat measurement = (cv::Mat_<float>(4, 1) << det.center.x, det.center.y,
                            det.size.width, det.size.height);
@@ -105,11 +93,6 @@ void ByteTracker::configure(const json &config) {
   match_thresh_ = config.value("match_thresh", 0.8f);
   max_time_lost_ = config.value("max_time_lost", 30);
   min_hits_ = config.value("min_hits", 3);
-
-  fprintf(stderr,
-          "[DEBUG] ByteTracker configured: track_thresh=%.2f, "
-          "high_thresh=%.2f, match_thresh=%.2f\n",
-          track_thresh_, high_thresh_, match_thresh_);
 }
 
 void ByteTracker::reset() {
@@ -130,13 +113,9 @@ bool ByteTracker::process(ProcessingContext &ctx) {
     ctx.track_time_ms =
         std::chrono::duration<double, std::milli>(end - start).count();
 
-    // fprintf(stderr, "[DEBUG] ByteTracker: Tracking %zu objects in %.2fms\n",
-    //               ctx.detections.size(), ctx.track_time_ms);
-
     return true;
   } catch (const std::exception &e) {
-    fprintf(stderr, "[ERROR] ByteTracker: Exception in process: %s\n",
-            e.what());
+    fprintf(stderr, "[ERROR] ByteTracker: %s\n", e.what());
     return false;
   }
 }
@@ -144,35 +123,24 @@ bool ByteTracker::process(ProcessingContext &ctx) {
 void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
   frame_id_ = frame_id;
 
-  // ========================================
-  // Step 1: 将检测分为高分和低分
-  // ========================================
-  std::vector<std::pair<Detection, int>>
-      dets_high; // {detection, original_index}
-  std::vector<std::pair<Detection, int>> dets_low;
+  // Step 1: 分离高分/低分检测
+  std::vector<std::pair<Detection, int>> dets_high, dets_low;
 
   for (size_t i = 0; i < detections.size(); ++i) {
-    if (detections[i].confidence >= track_thresh_) {
+    if (detections[i].confidence >= track_thresh_)
       dets_high.push_back({detections[i], static_cast<int>(i)});
-    } else {
+    else
       dets_low.push_back({detections[i], static_cast<int>(i)});
-    }
   }
 
-  // ========================================
-  // Step 2: 预测所有跟踪对象的新位置
-  // ========================================
-  for (auto &track : tracked_stracks_) {
+  // Step 2: 预测
+  for (auto &track : tracked_stracks_)
     track.predict();
-  }
-  for (auto &track : lost_stracks_) {
+  for (auto &track : lost_stracks_)
     track.predict();
-  }
 
-  // ========================================
-  // Step 3: 高分检测与已跟踪对象匹配
-  // ========================================
-  std::vector<std::pair<int, int>> matches_high; // {track_idx, det_idx}
+  // Step 3: 高分检测匹配
+  std::vector<std::pair<int, int>> matches_high;
   std::vector<int> unmatched_tracks_high;
   std::vector<int> unmatched_dets_high;
 
@@ -180,7 +148,6 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
     auto cost = iou_distance(tracked_stracks_, dets_high);
     matches_high = linear_assignment(cost, match_thresh_);
 
-    // 找出未匹配的
     std::vector<bool> track_matched(tracked_stracks_.size(), false);
     std::vector<bool> det_matched(dets_high.size(), false);
 
@@ -189,24 +156,20 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
       det_matched[di] = true;
     }
 
-    for (size_t i = 0; i < tracked_stracks_.size(); ++i) {
+    for (size_t i = 0; i < tracked_stracks_.size(); ++i)
       if (!track_matched[i])
         unmatched_tracks_high.push_back(i);
-    }
-    for (size_t i = 0; i < dets_high.size(); ++i) {
+    for (size_t i = 0; i < dets_high.size(); ++i)
       if (!det_matched[i])
         unmatched_dets_high.push_back(i);
-    }
   } else {
-    for (size_t i = 0; i < tracked_stracks_.size(); ++i) {
+    for (size_t i = 0; i < tracked_stracks_.size(); ++i)
       unmatched_tracks_high.push_back(i);
-    }
-    for (size_t i = 0; i < dets_high.size(); ++i) {
+    for (size_t i = 0; i < dets_high.size(); ++i)
       unmatched_dets_high.push_back(i);
-    }
   }
 
-  // 更新已匹配的跟踪对象
+  // 更新匹配
   for (auto &[ti, di] : matches_high) {
     tracked_stracks_[ti].update(dets_high[di].first.obb, frame_id_,
                                 dets_high[di].first.confidence);
@@ -214,42 +177,35 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
     tracked_stracks_[ti].class_id = dets_high[di].first.class_id;
   }
 
-  // ========================================
-  // Step 4: 低分检测与未匹配的跟踪对象匹配
-  // ========================================
+  // Step 4: 低分检测匹配
   std::vector<STrack> remain_tracks;
-  for (int idx : unmatched_tracks_high) {
+  for (int idx : unmatched_tracks_high)
     remain_tracks.push_back(tracked_stracks_[idx]);
-  }
 
   std::vector<std::pair<int, int>> matches_low;
   std::vector<int> unmatched_tracks_low;
 
   if (!remain_tracks.empty() && !dets_low.empty()) {
     auto cost = iou_distance(remain_tracks, dets_low);
-    matches_low = linear_assignment(cost, 0.5f); // 低分匹配阈值更宽松
+    matches_low = linear_assignment(cost, 0.5f);
 
     std::vector<bool> track_matched(remain_tracks.size(), false);
     for (auto &[ti, di] : matches_low) {
       track_matched[ti] = true;
-      // 更新tracked_stracks_中的对应项
       int orig_idx = unmatched_tracks_high[ti];
       tracked_stracks_[orig_idx].update(dets_low[di].first.obb, frame_id_,
                                         dets_low[di].first.confidence);
       tracked_stracks_[orig_idx].state = TrackState::Tracked;
     }
 
-    for (size_t i = 0; i < remain_tracks.size(); ++i) {
+    for (size_t i = 0; i < remain_tracks.size(); ++i)
       if (!track_matched[i])
         unmatched_tracks_low.push_back(unmatched_tracks_high[i]);
-    }
   } else {
     unmatched_tracks_low = unmatched_tracks_high;
   }
 
-  // ========================================
-  // Step 5: 处理未匹配的跟踪对象 (标记为Lost)
-  // ========================================
+  // Step 5: 未匹配 → Lost
   for (int idx : unmatched_tracks_low) {
     if (tracked_stracks_[idx].state != TrackState::Lost) {
       tracked_stracks_[idx].state = TrackState::Lost;
@@ -257,13 +213,10 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
     }
   }
 
-  // ========================================
-  // Step 6: 未匹配的高分检测与Lost对象匹配
-  // ========================================
+  // Step 6: 与 Lost 匹配
   std::vector<std::pair<Detection, int>> remain_dets_high;
-  for (int idx : unmatched_dets_high) {
+  for (int idx : unmatched_dets_high)
     remain_dets_high.push_back(dets_high[idx]);
-  }
 
   std::vector<int> reactivated_lost;
 
@@ -282,11 +235,9 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
       det_matched[di] = true;
     }
 
-    // 更新未匹配检测列表
     unmatched_dets_high.clear();
     for (size_t i = 0; i < remain_dets_high.size(); ++i) {
       if (!det_matched[i]) {
-        // 找到原始索引
         for (size_t j = 0; j < dets_high.size(); ++j) {
           if (dets_high[j].second == remain_dets_high[i].second) {
             unmatched_dets_high.push_back(j);
@@ -297,9 +248,7 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
     }
   }
 
-  // ========================================
-  // Step 7: 创建新轨迹
-  // ========================================
+  // Step 7: 新轨迹
   for (int idx : unmatched_dets_high) {
     const auto &det = dets_high[idx].first;
     if (det.confidence >= high_thresh_) {
@@ -316,62 +265,47 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
     }
   }
 
-  // ========================================
-  // Step 8: 整理跟踪列表
-  // ========================================
-
-  // 重新激活的Lost对象加回tracked
+  // Step 8: 整理
   std::sort(reactivated_lost.rbegin(), reactivated_lost.rend());
   for (int idx : reactivated_lost) {
     tracked_stracks_.push_back(lost_stracks_[idx]);
     lost_stracks_.erase(lost_stracks_.begin() + idx);
   }
 
-  // 移除Lost太久的对象
-  lost_stracks_.erase(std::remove_if(lost_stracks_.begin(), lost_stracks_.end(),
-                                     [this](const STrack &t) {
-                                       return t.time_since_update >
-                                              max_time_lost_;
-                                     }),
-                      lost_stracks_.end());
+  lost_stracks_.erase(
+      std::remove_if(lost_stracks_.begin(), lost_stracks_.end(),
+                     [this](const STrack &t) {
+                       return t.time_since_update > max_time_lost_;
+                     }),
+      lost_stracks_.end());
 
-  // 从tracked中移除Lost状态的
-  tracked_stracks_.erase(std::remove_if(tracked_stracks_.begin(),
-                                        tracked_stracks_.end(),
-                                        [](const STrack &t) {
-                                          return t.state == TrackState::Lost ||
-                                                 t.state == TrackState::Removed;
-                                        }),
-                         tracked_stracks_.end());
+  tracked_stracks_.erase(
+      std::remove_if(tracked_stracks_.begin(), tracked_stracks_.end(),
+                     [](const STrack &t) {
+                       return t.state == TrackState::Lost ||
+                              t.state == TrackState::Removed;
+                     }),
+      tracked_stracks_.end());
 
-  // ========================================
-  // Step 9: 更新检测结果的track_id
-  // ========================================
-  for (auto &det : detections) {
-    det.track_id = -1; // 默认无跟踪
-  }
+  // Step 9: 更新 track_id
+  for (auto &det : detections)
+    det.track_id = -1;
 
-  // 高分匹配
   for (auto &[ti, di] : matches_high) {
     int orig_idx = dets_high[di].second;
-    if (tracked_stracks_[ti].hits >= min_hits_) {
+    if (tracked_stracks_[ti].hits >= min_hits_)
       detections[orig_idx].track_id = tracked_stracks_[ti].track_id;
-    }
   }
 
-  // 低分匹配
   for (auto &[ti, di] : matches_low) {
     int orig_ti = unmatched_tracks_high[ti];
     int orig_idx = dets_low[di].second;
-    if (tracked_stracks_[orig_ti].hits >= min_hits_) {
+    if (tracked_stracks_[orig_ti].hits >= min_hits_)
       detections[orig_idx].track_id = tracked_stracks_[orig_ti].track_id;
-    }
   }
 
-  // 新创建的轨迹
   for (auto &track : tracked_stracks_) {
     if (track.start_frame == frame_id_ && track.hits >= min_hits_) {
-      // 找到对应的检测
       for (auto &det : detections) {
         if (det.track_id == -1 &&
             std::abs(det.obb.center.x - track.bbox.center.x) < 1.0f &&
@@ -385,7 +319,7 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
 }
 
 // ============================================================================
-// IOU距离计算
+// IOU 距离
 // ============================================================================
 namespace {
 
@@ -393,9 +327,8 @@ float rotated_iou(const cv::RotatedRect &a, const cv::RotatedRect &b) {
   std::vector<cv::Point2f> inter_pts;
   int ret = cv::rotatedRectangleIntersection(a, b, inter_pts);
 
-  if (ret == cv::INTERSECT_NONE || inter_pts.size() < 3) {
+  if (ret == cv::INTERSECT_NONE || inter_pts.size() < 3)
     return 0.0f;
-  }
 
   cv::convexHull(inter_pts, inter_pts);
   float inter_area = static_cast<float>(cv::contourArea(inter_pts));
@@ -422,7 +355,7 @@ ByteTracker::iou_distance(const std::vector<STrack> &tracks,
   for (size_t i = 0; i < tracks.size(); ++i) {
     for (size_t j = 0; j < dets.size(); ++j) {
       float iou = rotated_iou(tracks[i].bbox, dets[j].first.obb);
-      cost[i][j] = 1.0f - iou; // 转换为代价
+      cost[i][j] = 1.0f - iou;
     }
   }
 
@@ -430,54 +363,85 @@ ByteTracker::iou_distance(const std::vector<STrack> &tracks,
 }
 
 // ============================================================================
-// 匈牙利算法 (简化贪心版本)
+// Hungarian/Munkres 算法 (Kuhn-Munkres, O(N^3))
 // ============================================================================
 std::vector<std::pair<int, int>> ByteTracker::linear_assignment(
     const std::vector<std::vector<float>> &cost_matrix, float thresh) {
 
-  if (cost_matrix.empty() || cost_matrix[0].empty()) {
+  if (cost_matrix.empty() || cost_matrix[0].empty())
     return {};
-  }
 
-  size_t num_tracks = cost_matrix.size();
-  size_t num_dets = cost_matrix[0].size();
+  int n = cost_matrix.size();    // rows (tracks)
+  int m = cost_matrix[0].size(); // cols (dets)
+  int sz = std::max(n, m);
 
-  std::vector<std::pair<int, int>> matches;
-  std::vector<bool> track_matched(num_tracks, false);
-  std::vector<bool> det_matched(num_dets, false);
+  // Pad to square matrix with threshold values
+  std::vector<std::vector<float>> C(sz, std::vector<float>(sz, thresh));
+  for (int i = 0; i < n; ++i)
+    for (int j = 0; j < m; ++j)
+      C[i][j] = cost_matrix[i][j];
 
-  // 贪心匹配: 每次选择代价最小的配对
-  while (true) {
-    float min_cost = thresh;
-    int best_track = -1;
-    int best_det = -1;
+  // Hungarian algorithm (Kuhn-Munkres)
+  const float INF = 1e9f;
+  std::vector<float> u(sz + 1, 0), v(sz + 1, 0);
+  std::vector<int> p(sz + 1, 0), way(sz + 1, 0);
 
-    for (size_t i = 0; i < num_tracks; ++i) {
-      if (track_matched[i])
-        continue;
-      for (size_t j = 0; j < num_dets; ++j) {
-        if (det_matched[j])
-          continue;
-        if (cost_matrix[i][j] < min_cost) {
-          min_cost = cost_matrix[i][j];
-          best_track = i;
-          best_det = j;
+  for (int i = 1; i <= sz; ++i) {
+    p[0] = i;
+    int j0 = 0;
+    std::vector<float> minv(sz + 1, INF);
+    std::vector<bool> used(sz + 1, false);
+
+    do {
+      used[j0] = true;
+      int i0 = p[j0], j1 = 0;
+      float delta = INF;
+
+      for (int j = 1; j <= sz; ++j) {
+        if (!used[j]) {
+          float cur = C[i0 - 1][j - 1] - u[i0] - v[j];
+          if (cur < minv[j]) {
+            minv[j] = cur;
+            way[j] = j0;
+          }
+          if (minv[j] < delta) {
+            delta = minv[j];
+            j1 = j;
+          }
         }
       }
-    }
 
-    if (best_track < 0)
-      break;
+      for (int j = 0; j <= sz; ++j) {
+        if (used[j]) {
+          u[p[j]] += delta;
+          v[j] -= delta;
+        } else {
+          minv[j] -= delta;
+        }
+      }
 
-    matches.push_back({best_track, best_det});
-    track_matched[best_track] = true;
-    det_matched[best_det] = true;
+      j0 = j1;
+    } while (p[j0] != 0);
+
+    do {
+      int j1 = way[j0];
+      p[j0] = p[j1];
+      j0 = j1;
+    } while (j0);
+  }
+
+  // Extract matches
+  std::vector<std::pair<int, int>> matches;
+  for (int j = 1; j <= sz; ++j) {
+    int i = p[j] - 1;
+    int jj = j - 1;
+    if (i < n && jj < m && cost_matrix[i][jj] < thresh)
+      matches.push_back({i, jj});
   }
 
   return matches;
 }
 
-// 注册处理器
 REGISTER_PROCESSOR("tracker", ByteTracker);
 
 } // namespace yolo_edge

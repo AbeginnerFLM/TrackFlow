@@ -59,6 +59,18 @@ public:
   Session &get_or_create(const std::string &session_id, const json &config) {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // 每 100 次访问清理过期 session
+    if (++access_count_ % 100 == 0) {
+      for (auto it = sessions_.begin(); it != sessions_.end();) {
+        if (it->second->is_expired(std::chrono::seconds(300))) {
+          fprintf(stderr, "[INFO] Session expired: %s\n", it->first.c_str());
+          it = sessions_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+
     auto it = sessions_.find(session_id);
     if (it != sessions_.end()) {
       it->second->touch();
@@ -126,6 +138,7 @@ public:
 
 private:
   mutable std::mutex mutex_;
+  int access_count_ = 0;
   std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
 };
 

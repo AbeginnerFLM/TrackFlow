@@ -30,11 +30,8 @@ public:
     auto start = Clock::now();
 
     for (auto &proc : processors_) {
-      // fprintf(stderr, "DEBUG: Executing processor: %s\n",
-      // proc->name().c_str());
-
       if (!proc->process(ctx)) {
-        fprintf(stderr, "Processor '%s' failed\n", proc->name().c_str());
+        fprintf(stderr, "[ERROR] Processor '%s' failed\n", proc->name().c_str());
         return false;
       }
     }
@@ -42,9 +39,6 @@ public:
     auto end = Clock::now();
     ctx.total_time_ms =
         std::chrono::duration<double, std::milli>(end - start).count();
-
-    // fprintf(stderr, "DEBUG: Pipeline completed in %.2fms\n",
-    // ctx.total_time_ms);
     return true;
   }
 

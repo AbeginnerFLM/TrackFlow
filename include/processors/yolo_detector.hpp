@@ -17,6 +17,16 @@ struct MemoryInfo;
 namespace yolo_edge {
 
 /**
+ * 预处理结果 (线程安全: 每帧独立的 scale/pad 信息)
+ */
+struct PreprocessResult {
+  cv::Mat blob;
+  float scale = 1.0f;
+  int pad_x = 0;
+  int pad_y = 0;
+};
+
+/**
  * YOLO目标检测器
  * 支持ONNX Runtime推理，兼容OBB和HBB检测
  */
@@ -30,15 +40,20 @@ public:
   void configure(const json &config) override;
 
 private:
-  // 预处理：letterbox + 归一化
-  cv::Mat preprocess(const cv::Mat &frame);
+  // 预处理：letterbox + 归一化 (返回独立的 scale/pad 信息)
+  PreprocessResult preprocess(const cv::Mat &frame);
 
-  // 运行推理
-  std::vector<cv::Mat> infer(const cv::Mat &blob);
+  // 运行推理 (零拷贝: 直接返回 float* + shape)
+  struct InferOutput {
+    std::vector<float> data; // 持有数据所有权
+    std::vector<int64_t> shape;
+  };
+  std::vector<InferOutput> infer(const cv::Mat &blob);
 
   // 后处理：解析输出 + NMS
-  std::vector<Detection> postprocess(const std::vector<cv::Mat> &outputs,
-                                     const cv::Size &original_size);
+  std::vector<Detection>
+  postprocess(const std::vector<InferOutput> &outputs,
+              const cv::Size &original_size, const PreprocessResult &prep);
 
   // 加载ONNX模型
   void load_model();
@@ -47,22 +62,22 @@ private:
   std::string model_path_;
   float conf_threshold_ = 0.5f;
   float nms_threshold_ = 0.45f;
-  bool is_obb_ = true; // OBB或HBB模式
+  bool is_obb_ = true;
   int input_width_ = 640;
   int input_height_ = 640;
   bool use_cuda_ = true;
+  bool is_end2end_ = false; // End-to-End 模型跳过 NMS
+  bool use_batch_engine_ = false; // 使用共享 BatchInferenceEngine
 
   // 类别名称
   std::vector<std::string> class_names_;
 
-  // ONNX Runtime对象 (使用pimpl避免头文件依赖)
+  // ONNX Runtime对象 (pimpl)
   struct OrtSession;
   std::unique_ptr<OrtSession> ort_;
 
-  // letterbox缩放信息 (用于坐标还原)
-  float scale_ = 1.0f;
-  int pad_x_ = 0;
-  int pad_y_ = 0;
+  // 预分配 buffer (避免每帧重新分配)
+  cv::Mat letterbox_buf_;
 
   bool initialized_ = false;
 };

@@ -2,7 +2,6 @@
 #include <App.h>
 #include <chrono>
 #include <cstdio>
-#include <iostream>
 
 namespace yolo_edge {
 
@@ -14,7 +13,6 @@ struct WebSocketServer::Impl {
   us_listen_socket_t *listen_socket = nullptr;
 };
 
-// Socket附加数据
 struct PerSocketData {
   std::string session_id;
   bool waiting_for_image = false;
@@ -43,13 +41,11 @@ void WebSocketServer::run() {
   uWS::App()
       .ws<PerSocketData>(
           "/*",
-          {// 连接设置
-           .compression = uWS::SHARED_COMPRESSOR,
-           .maxPayloadLength = 100 * 1024 * 1024, // 100MB (支持大图)
+          {.compression = uWS::SHARED_COMPRESSOR,
+           .maxPayloadLength = 100 * 1024 * 1024,
            .idleTimeout = 120,
            .maxBackpressure = 16 * 1024 * 1024,
 
-           // 新连接
            .open =
                [](auto *ws) {
                  auto *data = ws->getUserData();
@@ -58,37 +54,31 @@ void WebSocketServer::run() {
                      std::to_string(std::chrono::steady_clock::now()
                                         .time_since_epoch()
                                         .count());
-                 fprintf(stderr, "Client connected: %s\n",
+                 fprintf(stderr, "[INFO] Client connected: %s\n",
                          data->session_id.c_str());
-
-                 // Send welcome message v5.1
-                 // Note: We cannot easily use send_json here as it is not
-                 // member of ws But we can send raw text. Actually, let's skip
-                 // it to avoid crashes.
                },
 
-           // 收到消息
            .message =
                [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
                  handle_message(ws, message, opCode == uWS::OpCode::BINARY);
                },
 
-           // 连接关闭
            .close =
                [this](auto *ws, int code, std::string_view message) {
                  auto *data = ws->getUserData();
-                 fprintf(stderr, "Client disconnected: %s (code: %d)\n",
-                         data->session_id.c_str(), code);
+                 fprintf(stderr, "[INFO] Client disconnected: %s\n",
+                         data->session_id.c_str());
                  sessions_.remove(data->session_id);
                }})
       .listen(port_,
               [this](auto *listen_socket) {
                 if (listen_socket) {
                   impl_->listen_socket = listen_socket;
-                  fprintf(stderr, "WebSocket server listening on port %d\n",
+                  fprintf(stderr, "[INFO] WebSocket server listening on port %d\n",
                           port_);
                 } else {
-                  fprintf(stderr, "Failed to listen on port %d\n", port_);
+                  fprintf(stderr, "[ERROR] Failed to listen on port %d\n",
+                          port_);
                   running_ = false;
                 }
               })
@@ -114,157 +104,65 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
   auto *socket_data = ws->getUserData();
   auto *loop = impl_->loop;
 
-  // ==========================================================================
-  // 1. 处理二进制消息 (图片数据)
-  // ==========================================================================
+  // 1. 二进制消息 (图片数据)
   if (is_binary) {
-    // std::cerr << "DEBUG: Binary message received. Size=" << message.size() <<
-    // std::endl;
-    if (!socket_data->waiting_for_image) {
-      fprintf(stderr, "Received unexpected binary message\n");
-      return;
-    }
+    if (!socket_data->waiting_for_image) return;
 
-    // 重置状态
     socket_data->waiting_for_image = false;
     json request = socket_data->pending_header;
 
-    // Log
-    // Log
-    // fprintf(stderr, "Binary message received: ptr=%p, size=%zu\n",
-    //        (void *)message.data(), message.size());
+    if (message.size() > 100 * 1024 * 1024) return;
 
-    if (message.size() > 100 * 1024 * 1024) {
-      fprintf(stderr, "Binary message too large: %zu\n", message.size());
-      return;
-    }
+    auto image_data = std::make_shared<std::vector<uint8_t>>(
+        message.begin(), message.end());
 
-    // 复制二进制数据 (使用shared_ptr避免拷贝)
-    // fprintf(stderr, "Allocating shared_ptr vector...\n");
-    auto image_data = std::make_shared<std::vector<uint8_t>>();
-
-    // Check max_size
-    size_t vec_max = image_data->max_size();
-    if (message.size() > vec_max) {
-      fprintf(stderr, "Requested size %zu > vector max_size %zu\n",
-              message.size(), vec_max);
-      return;
-    }
-
-    try {
-      // fprintf(stderr, "Assigning data to vector (size=%zu)...\n",
-      // message.size());
-      image_data->assign(message.begin(), message.end());
-      // fprintf(stderr, "Vector assignment complete. Vector size: %zu\n",
-      //              image_data->size());
-    } catch (const std::exception &e) {
-      fprintf(stderr, "Vector allocation failed: size=%zu, error=%s\n",
-              message.size(), e.what());
-      return;
-    }
-
-    // 投入线程池执行推理
-    // fprintf(stderr, "Enqueuing task to thread pool...\n");
-    auto enqueue_time = std::chrono::steady_clock::now();
-    pool_.enqueue([this, ws, socket_data, loop, request, image_data,
-                   enqueue_time]() {
-      ProcessingContext ctx;
+    pool_.enqueue([this, ws, socket_data, loop, request,
+                   image_data]() {
       json response;
-      auto start_time = std::chrono::steady_clock::now();
-      long queue_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          start_time - enqueue_time)
-                          .count();
-
       try {
-        // ... (existing code)
-        // std::cerr << "DEBUG_TRACE: Task started" << std::endl;
-
+        ProcessingContext ctx;
         std::string request_id = request.value("request_id", "");
-
-        // 准备上下文
         ctx.request_id = request_id;
         ctx.session_id = request.value("session_id", socket_data->session_id);
         ctx.frame_id = request.value("frame_id", 0);
-
-        // std::cerr << "DEBUG_TRACE: Context prepared. ID=" << ctx.session_id
-        // << std::endl;
-
-        // **关键修改**: 直接放入二进制数据，而不是base64字符串
-        // 我们利用 std::any 存储 vector<uint8_t>
         ctx.set("image_binary", image_data);
 
-        // std::cerr << "DEBUG_TRACE: Binary data set to context" << std::endl;
-
-        // 获取Session
         json pipeline_config;
-        pipeline_config = {{"pipeline", {"decoder", "yolo"}},
+        pipeline_config = {{"pipeline", {"decoder", "yolo", "tracker"}},
                            {"config", request.value("config", json::object())}};
 
-        // std::cerr << "DEBUG_TRACE: Getting session..." << std::endl;
+        auto &session = sessions_.get_or_create(ctx.session_id, pipeline_config);
 
-        auto &session =
-            sessions_.get_or_create(ctx.session_id, pipeline_config);
-
-        // std::cerr << "DEBUG_TRACE: Session retrieved. Starting pipeline
-        // execute..." << std::endl;
-
-        // 执行Pipeline
         bool success;
         {
           std::lock_guard<std::mutex> lock(session.pipeline_mutex);
           success = session.pipeline.execute(ctx);
         }
 
-        // std::cerr << "DEBUG_TRACE: Pipeline finished. Success=" << success <<
-        // std::endl;
-
-        if (!success) {
-          fprintf(stderr,
-                  "DEBUG_TRACE: Pipeline execution FAILED for session %s\n",
-                  ctx.session_id.c_str());
-        }
-
         response = build_response(ctx, request, success);
 
       } catch (const std::exception &e) {
-        fprintf(stderr, "Binary processing error: %s\n", e.what());
         response = build_error(e.what());
       }
 
-      auto end_time = std::chrono::steady_clock::now();
-      long proc_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         end_time - start_time)
-                         .count();
-      fprintf(stderr, "[DIAG] Frame ID=%d: Queue=%ldms, Proc=%ldms\n",
-              ctx.frame_id, queue_ms, proc_ms);
-
-      // 发送响应
       loop->defer(
           [ws, response]() { ws->send(response.dump(), uWS::OpCode::TEXT); });
     });
     return;
   }
 
-  // ==========================================================================
-  // 2. 处理文本消息 (JSON)
-  // ==========================================================================
+  // 2. 文本消息 (JSON)
   try {
     json request = json::parse(message);
     std::string request_type = request.value("type", "infer");
 
-    // std::cerr << "DEBUG_TRACE: Text handler. Type='" << request_type << "'"
-    // << std::endl;
-
-    // 2.1 推理头信息 (准备接收二进制图片)
     if (request_type == "infer_header") {
-      // std::cerr << "DEBUG_TRACE: Sync handling infer_header" << std::endl;
       socket_data->pending_header = request;
       socket_data->waiting_for_image = true;
-      return; // 等待下一帧二进制数据
+      return;
     }
 
-    // 2.2 其他请求 (ping, reset, 或旧版base64 infer)
-    std::string msg_copy(message); // 复制用于异步处理
+    std::string msg_copy(message);
 
     pool_.enqueue([this, ws, socket_data, loop, msg_copy]() {
       json response;
@@ -281,17 +179,14 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
           response = {
               {"type", "reset_ack"}, {"request_id", rid}, {"session_id", sid}};
         } else if (type == "infer") {
-          // 旧版带Base64的请求
           ProcessingContext ctx;
           ctx.request_id = rid;
           ctx.session_id = req.value("session_id", socket_data->session_id);
           ctx.frame_id = req.value("frame_id", 0);
 
-          if (req.contains("image")) {
+          if (req.contains("image"))
             ctx.set("image_base64", req["image"].get<std::string>());
-          }
 
-          // 获取Session (同上)
           json pipeline_config;
           if (req.contains("pipeline"))
             pipeline_config = req;
@@ -319,14 +214,13 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
     });
 
   } catch (const std::exception &e) {
-    // JSON解析失败等
     json err = build_error("Invalid JSON: " + std::string(e.what()));
     ws->send(err.dump(), uWS::OpCode::TEXT);
   }
 }
 
 // ============================================================================
-// 构建响应
+// 构建响应 (优化: 减少冗余计算)
 // ============================================================================
 json WebSocketServer::build_response(const ProcessingContext &ctx,
                                      const json &request, bool success) {
@@ -340,48 +234,43 @@ json WebSocketServer::build_response(const ProcessingContext &ctx,
     return response;
   }
 
-  // 检测结果
   json detections = json::array();
-  for (const auto &det : ctx.detections) {
-    json det_json = {
-        {"track_id", det.track_id},
-        {"class_id", det.class_id},
-        {"class_name", det.class_name},
-        {"confidence", det.confidence},
-    };
+  detections.get_ref<json::array_t &>().reserve(ctx.detections.size());
 
-    // OBB points (8 floats)
+  for (const auto &det : ctx.detections) {
+    json det_json;
+
+    // 基本信息
+    det_json["track_id"] = det.track_id;
+    det_json["class_id"] = det.class_id;
+    det_json["class_name"] = det.class_name;
+    det_json["confidence"] = det.confidence;
+    det_json["angle"] = det.obb.angle;
+
+    // OBB 顶点
     cv::Point2f pts[4];
     det.obb.points(pts);
     det_json["obb"] = {pts[0].x, pts[0].y, pts[1].x, pts[1].y,
                        pts[2].x, pts[2].y, pts[3].x, pts[3].y};
 
-    // HBB (x, y, w, h)
+    // HBB
     cv::Rect rect = det.obb.boundingRect();
     det_json["bbox"] = {rect.x, rect.y, rect.width, rect.height};
 
-    // Angle
-    det_json["angle"] = det.obb.angle;
-
     // 可选地理坐标
-    if (det.ground_x.has_value()) {
+    if (det.ground_x.has_value())
       det_json["ground_x"] = det.ground_x.value();
-    }
-    if (det.ground_y.has_value()) {
+    if (det.ground_y.has_value())
       det_json["ground_y"] = det.ground_y.value();
-    }
-    if (det.lon.has_value()) {
+    if (det.lon.has_value())
       det_json["lon"] = det.lon.value();
-    }
-    if (det.lat.has_value()) {
+    if (det.lat.has_value())
       det_json["lat"] = det.lat.value();
-    }
 
-    detections.push_back(det_json);
+    detections.push_back(std::move(det_json));
   }
-  response["detections"] = detections;
+  response["detections"] = std::move(detections);
 
-  // 计时信息
   response["timing"] = {{"decode_ms", ctx.decode_time_ms},
                         {"infer_ms", ctx.infer_time_ms},
                         {"track_ms", ctx.track_time_ms},
