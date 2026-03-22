@@ -7,8 +7,10 @@
 
 ## 系统架构
 
+### 方案A: 远程访问 (通过 VPS)
+
 ```
-用户浏览器
+用户浏览器 (任意网络)
     │
     ├── HTTP (test_v4.html)    ──→  VPS:8080 (nginx 静态文件)
     │
@@ -24,6 +26,24 @@ GPU 服务器 (WSL on Windows)
     ├── yolo_edge_server (:9001) # C++ 推理服务
     └── FRP Client               # 连接到 VPS
 ```
+
+> ⚠️ FRP 带宽约 20KB/s，帧传输延迟高，仅适合远程测试。
+
+### 方案B: 本机直连 (推荐用于性能测试)
+
+```
+Windows 浏览器 (GPU 服务器本机)
+    │
+    ├── HTTP (test_v4.html)    ──→  WSL:8080 (nginx 静态文件)
+    │
+    └── WebSocket (/ws)        ──→  WSL:8080 (nginx) ──→ WSL:9001 (yolo_edge_server)
+
+GPU 服务器 WSL
+    ├── yolo_edge_server (:9001) # C++ 推理服务
+    └── nginx (:8080)            # 静态文件 + WebSocket 反代 (/ws → 127.0.0.1:9001)
+```
+
+> 本机直连无网络瓶颈，延迟即为纯推理耗时。浏览器访问 `http://localhost:8080/test_v4.html`
 
 ### 推理管线架构
 
@@ -46,8 +66,9 @@ WebSocket Server (线程池)
 
 | 资源 | 地址 | 认证 |
 |------|------|------|
-| 前端页面 | `http://142.171.65.88:8080/test_v4.html` | 无 |
-| WebSocket | `ws://142.171.65.88:8080/ws` (同源, nginx 反代) | 无 |
+| 前端 (远程) | `http://142.171.65.88:8080/test_v4.html` | 无 |
+| 前端 (本机) | `http://localhost:8080/test_v4.html` | 无 |
+| WebSocket | `ws://<host>:8080/ws` (nginx 反代, 同源自动路由) | 无 |
 | GPU SSH (从 VPS) | `ssh -p 9022 xf@localhost` | 密码: `123456xf` |
 | GPU SSH (直接) | `ssh 10.6.22.1` → `wsl` → `su - xf` | Windows: `4090`, xf: `123456xf` |
 | FRP 仪表盘 | `http://142.171.65.88:7500` | admin / trackflow2026 |
@@ -89,7 +110,26 @@ sshpass -p '123456xf' ssh -p 9022 xf@localhost "
 "
 ```
 
-### nginx 配置 (VPS 上)
+### nginx 配置 (GPU WSL 本机)
+
+配置文件: `/etc/nginx/sites-available/trackflow`
+
+```nginx
+server {
+    listen 8080;
+    root /home/xf/TrackFlow;
+
+    location /ws {
+        proxy_pass http://127.0.0.1:9001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;
+    }
+}
+```
+
+### nginx 配置 (VPS 远程)
 
 配置文件: `/etc/nginx/sites-available/trackflow`
 
@@ -123,13 +163,19 @@ systemctl restart nginx
 ## 关键注意事项
 
 1. **静默模式**: 推理服务必须将输出重定向到 `/dev/null`。通过 SSH 打印到终端会导致严重延迟 (观察者效应)
-2. **网络链路**: 客户端 → VPS → FRP → GPU 存在网络开销，高延迟通常是带宽问题而非推理瓶颈
+2. **网络链路**: 远程访问经 VPS→FRP→GPU，FRP 带宽约 20KB/s，高延迟是网络瓶颈而非推理瓶颈。本机直连可排除网络因素。
 3. **端口映射**:
-   - `9001`: GPU 服务器本地监听端口
-   - `9002`: VPS 上的 FRP 映射端口 (nginx 内部转发, 客户端不直接访问)
+   - `9001`: GPU WSL 本地推理服务端口
+   - `8080`: nginx 端口 (VPS 和 GPU WSL 均使用此端口)
+   - `9002`: VPS 上的 FRP 映射端口 (VPS nginx 内部转发到此, 客户端不直接访问)
    - `9022`: VPS 上的 FRP SSH 端口 (映射到 GPU WSL 的 SSH)
-   - `8080`: VPS 上的 nginx 端口 (前端页面 + WebSocket 反代)
 4. **模型文件**: 当前使用 `yolo26_4batch.onnx`，支持动态 batch (N=1~4)。如更换模型需同时更新 `config/config.yaml` 中的 `model_path`
+5. **本机 nginx 权限**: WSL 中 nginx 以 www-data 运行，需要 `/home/xf` 目录有 o+x 权限，`test_v4.html` 有 o+r 权限
+   ```bash
+   sudo chmod o+x /home/xf
+   sudo chmod o+x /home/xf/TrackFlow
+   sudo chmod o+r /home/xf/TrackFlow/test_v4.html
+   ```
 
 ## 目录结构
 
