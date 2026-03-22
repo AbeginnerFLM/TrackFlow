@@ -133,11 +133,27 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
 
         auto &session = sessions_.get_or_create(ctx.session_id, pipeline_config);
 
-        bool success;
-        {
-          std::lock_guard<std::mutex> lock(session.pipeline_mutex);
-          success = session.pipeline.execute(ctx);
+        using Clock = std::chrono::high_resolution_clock;
+        auto start = Clock::now();
+
+        // Phase 1: decode + yolo (并行, 允许 BatchEngine 凑 batch)
+        bool success = session.pipeline.execute_range(ctx, 0, 2);
+
+        // Phase 2: tracker (按帧序串行, RAII 保证 advance)
+        session.wait_for_turn(ctx.frame_id);
+        try {
+          if (success) {
+            success = session.pipeline.execute_range(ctx, 2, session.pipeline.size());
+          }
+        } catch (...) {
+          session.advance_turn();
+          throw;
         }
+        session.advance_turn();
+
+        auto end = Clock::now();
+        ctx.total_time_ms =
+            std::chrono::duration<double, std::milli>(end - start).count();
 
         response = build_response(ctx, request, success);
 

@@ -293,7 +293,8 @@ public:
     ProcessingPipeline create_pipeline(const json& config) {
         ProcessingPipeline pipeline;
         
-        // JSON格式: {"pipeline": [{"type":"decoder"}, {"type":"yolo",...}]}
+        // 传入这样的 JSON：
+        // {"pipeline": ["decoder", "yolo", "tracker"]}
         if (!config.contains("pipeline")) {
             throw std::runtime_error("Config missing 'pipeline' array");
         }

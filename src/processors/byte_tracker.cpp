@@ -324,14 +324,14 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
 namespace {
 
 float rotated_iou(const cv::RotatedRect &a, const cv::RotatedRect &b) {
-  std::vector<cv::Point2f> inter_pts;
+  std::vector<cv::Point2f> inter_pts, hull_pts;
   int ret = cv::rotatedRectangleIntersection(a, b, inter_pts);
 
   if (ret == cv::INTERSECT_NONE || inter_pts.size() < 3)
     return 0.0f;
 
-  cv::convexHull(inter_pts, inter_pts);
-  float inter_area = static_cast<float>(cv::contourArea(inter_pts));
+  cv::convexHull(inter_pts, hull_pts);
+  float inter_area = static_cast<float>(cv::contourArea(hull_pts));
 
   float area_a = a.size.width * a.size.height;
   float area_b = b.size.width * b.size.height;

@@ -7,7 +7,7 @@ namespace yolo_edge {
 
 /**
  * 畸变校正处理器
- * 在检测前对整帧图像进行畸变校正
+ * 只校正检测目标的中心点坐标（用于后续经纬度计算），不处理整帧图像
  */
 class UndistortProcessor : public ImageProcessor {
 public:
@@ -16,10 +16,8 @@ public:
   void configure(const json &config) override;
 
 private:
-  cv::Mat K_;           // 相机内参
-  cv::Mat dist_;        // 畸变系数
-  cv::Mat map1_, map2_; // 预计算的映射表
-  cv::Mat new_K_;       // 新的相机矩阵
+  cv::Mat K_;    // 相机内参
+  cv::Mat dist_; // 畸变系数
 
   bool initialized_ = false;
 };

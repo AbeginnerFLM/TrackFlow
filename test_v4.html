@@ -124,8 +124,7 @@
             </div>
             <div class="toolbar">
                 <button class="btn" onclick="$('fi').click()">Open Video</button>
-                <button class="btn" id="btnPrev" disabled onclick="preview()">Preview</button>
-                <button class="btn btn-g" id="btnInfer" disabled onclick="startInfer()">Inference</button>
+                <button class="btn btn-g" id="btnInfer" disabled onclick="startInfer()">Start</button>
                 <button class="btn hidden" id="btnPause" onclick="pauseInfer()">Pause</button>
                 <button class="btn btn-r hidden" id="btnStop" onclick="stopInfer()">Stop</button>
                 <div class="sep"></div>
@@ -155,15 +154,31 @@
 const $=id=>document.getElementById(id);
 const vid=$('vid'),cvs=$('cvs'),cx=cvs.getContext('2d');
 const cap=document.createElement('canvas'),capCx=cap.getContext('2d');
-let ws=null,streaming=false,paused=false,pending=false;
-let frameId=0,t0=0,scale=1,targetFps=10,videoLoaded=false;
+let ws=null,streaming=false,paused=false;
+let frameId=0,scale=1,targetFps=10,videoLoaded=false;
+const MAX_INFLIGHT=4;
+let inflightFrames=new Map(); /* request_id -> {img, t0} */
+let nextFrameTime=0,seekBusy=false,fpsT0=0,fpsCnt=0;
 const colors=['#48f08b','#f28b82','#8ab4f8','#fdd663','#c58af9','#ff8bcb','#36d1a0','#78d9ec','#fcb75e','#a8c7fa'];
 const cfg={yolo:{model_path:'models/yolo26.onnx',confidence:0.5,nms_threshold:0.45,use_cuda:true},tracker:{enabled:true}};
+
+/* Log */
+function log(msg,type){
+    const b=$('logB'),e=$('logE');
+    if(e)e.remove();
+    const d=document.createElement('div');
+    d.className='le'+(type?' '+type:'');
+    const t=new Date(),ts=t.getHours()+':'+(t.getMinutes()<10?'0':'')+t.getMinutes()+':'+(t.getSeconds()<10?'0':'')+t.getSeconds();
+    d.innerHTML='<span class="t">'+ts+'</span><span class="m">'+msg+'</span>';
+    b.appendChild(d);b.scrollTop=b.scrollHeight;
+}
+function clearLog(){$('logB').innerHTML='<div class="log-empty" id="logE">Ready</div>'}
 
 /* Connection */
 function toggleConn(){ws&&ws.readyState===1?ws.close():connect()}
 function connect(){
-    const url='ws://'+location.hostname+':9002';
+    const proto=location.protocol==='https:'?'wss':'ws';
+    const url=proto+'://'+location.host+'/ws';
     log('Connecting to '+url+'...');
     ws=new WebSocket(url);
     ws.onopen=()=>{log('Connected','success');setConn(true)};
@@ -185,13 +200,12 @@ function loadVideo(f){
     vid.style.display='block';cvs.style.display='none';
     $('ph').style.display='none';$('tl').classList.remove('hidden');
     vid.onloadedmetadata=()=>{
-        cap.width=Math.min(vid.videoWidth,1280);
+        cap.width=Math.min(vid.videoWidth,960);
         const s=cap.width/vid.videoWidth;
         cap.height=Math.round(vid.videoHeight*s);
         scale=vid.videoWidth/cap.width;
         cvs.width=vid.videoWidth;cvs.height=vid.videoHeight;
         videoLoaded=true;
-        $('btnPrev').disabled=false;
         setConn(ws&&ws.readyState===1);
         log('Loaded: '+f.name+' ('+vid.videoWidth+'x'+vid.videoHeight+', '+fmt(vid.duration)+')','success');
     };
@@ -206,73 +220,88 @@ function seek(e){const r=e.currentTarget.getBoundingClientRect();vid.currentTime
 function ppIco(){$('ppIco').innerHTML=vid.paused?'<path d="M8 5v14l11-7z"/>':'<path d="M6 4h4v16H6zM14 4h4v16h-4z"/>'}
 function fmt(s){if(!isFinite(s))return'0:00';const m=Math.floor(s/60),sc=Math.floor(s%60);return m+':'+(sc<10?'0':'')+sc}
 
-/* Preview: just play the video without inference */
-function preview(){
-    if(!videoLoaded)return;
-    vid.style.display='block';cvs.style.display='none';
-    vid.currentTime=0;vid.play();ppIco();
-}
-
-/* Inference */
+/* Inference — pipeline N frames, seek-based, batch-friendly */
 function startInfer(){
     if(!ws||ws.readyState!==1||!videoLoaded)return;
-    streaming=true;paused=false;pending=false;frameId=0;
-    vid.currentTime=0;vid.play();ppIco();
+    streaming=true;paused=false;frameId=0;
     targetFps=+$('fpsSel').value;
-    $('btnInfer').classList.add('hidden');$('btnPrev').classList.add('hidden');
+    nextFrameTime=0;seekBusy=false;
+    inflightFrames.clear();fpsT0=performance.now();fpsCnt=0;
+    vid.pause();vid.currentTime=0;ppIco();
+    $('btnInfer').classList.add('hidden');
     $('btnPause').classList.remove('hidden');$('btnStop').classList.remove('hidden');
     $('live').style.visibility='visible';
     vid.style.display='none';cvs.style.display='block';
-    log('Inference started ('+targetFps+' fps)','success');
-    sendNext();
+    log('Inference started ('+targetFps+' fps, batch='+MAX_INFLIGHT+')','success');
+    ws.send(JSON.stringify({type:'reset'})); /* reset tracker state, wait for ack before pumping */
 }
 function pauseInfer(){
     paused=!paused;
-    if(paused){vid.pause();$('btnPause').textContent='Resume'}
-    else{vid.play();$('btnPause').textContent='Pause';if(!pending)sendNext()}
-    ppIco();
+    $('btnPause').textContent=paused?'Resume':'Pause';
+    if(!paused)pumpFrames();
 }
 function stopInfer(){
-    streaming=false;paused=false;pending=false;vid.pause();ppIco();
-    $('btnInfer').classList.remove('hidden');$('btnPrev').classList.remove('hidden');
+    streaming=false;paused=false;seekBusy=false;
+    inflightFrames.clear();
+    $('btnInfer').classList.remove('hidden');
     $('btnPause').classList.add('hidden');$('btnStop').classList.add('hidden');
     $('btnPause').textContent='Pause';$('live').style.visibility='hidden';
     vid.style.display='block';cvs.style.display='none';
-    log('Stopped at frame '+frameId);
+    ppIco();log('Stopped at frame '+frameId);
 }
-function sendNext(){
-    if(!streaming||paused||pending)return;
-    if(vid.ended){stopInfer();return}
-    capCx.drawImage(vid,0,0,cap.width,cap.height);
-    cap.toBlob(b=>{
-        if(!streaming||!b)return;
-        b.arrayBuffer().then(buf=>{
-            if(!streaming)return;
-            frameId++;t0=performance.now();pending=true;
-            ws.send(JSON.stringify({type:'infer_header',request_id:'f_'+frameId,frame_id:frameId,config:cfg}));
-            ws.send(buf);
-        });
-    },'image/jpeg',0.85);
+/* Pump: seek → capture → send, repeat until MAX_INFLIGHT in flight */
+function pumpFrames(){
+    if(!streaming||paused||seekBusy||inflightFrames.size>=MAX_INFLIGHT)return;
+    if(nextFrameTime>=vid.duration-0.05){
+        if(inflightFrames.size===0){stopInfer();log('Completed all frames','success');}
+        return;
+    }
+    seekBusy=true;
+    vid.currentTime=nextFrameTime;
+    vid.addEventListener('seeked',function h(){
+        vid.removeEventListener('seeked',h);
+        seekBusy=false;
+        if(!streaming)return;
+        capCx.drawImage(vid,0,0,cap.width,cap.height);
+        const imgData=capCx.getImageData(0,0,cap.width,cap.height);
+        cap.toBlob(b=>{
+            if(!b||!streaming)return;
+            b.arrayBuffer().then(buf=>{
+                if(!streaming)return;
+                frameId++;
+                const rid='f_'+frameId;
+                inflightFrames.set(rid,{img:imgData,t0:performance.now()});
+                ws.send(JSON.stringify({type:'infer_header',request_id:rid,frame_id:frameId,config:cfg}));
+                ws.send(buf);
+                nextFrameTime+=1/targetFps;
+                pumpFrames(); /* try to fill pipeline */
+            });
+        },'image/jpeg',0.5);
+    });
 }
 
 /* Response */
 function onMsg(data){
     try{
         const r=JSON.parse(data);
-        if(r.type==='pong'){log('Pong','success');return}
-        if(r.type==='error'){log('Error: '+(r.error||'unknown'),'error');pending=false;return}
-        const lat=performance.now()-t0,det=r.detections||[],tm=r.timing||{};
+        if(r.type==='pong')return;
+        if(r.type==='reset_ack'){pumpFrames();return;}
+        if(r.type==='error'){log('Error: '+(r.error||'unknown'),'error');inflightFrames.delete(r.request_id);pumpFrames();return}
+        const entry=inflightFrames.get(r.request_id);
+        const lat=entry?performance.now()-entry.t0:0;
+        if(entry){capCx.putImageData(entry.img,0,0);inflightFrames.delete(r.request_id);}
+        const det=r.detections||[],tm=r.timing||{};
+        fpsCnt++;
+        const elapsed=(performance.now()-fpsT0)/1000;
         $('sLat').textContent=lat.toFixed(0);
         $('sInf').textContent=(tm.infer_ms||0).toFixed(0);
-        $('sFps').textContent=(1000/lat).toFixed(1);
+        $('sFps').textContent=elapsed>0.5?(fpsCnt/elapsed).toFixed(1):'-';
         $('sDet').textContent=det.length;
-        $('sFrm').textContent=frameId;
+        $('sFrm').textContent=r.frame_id||frameId;
         draw(det);
-        pending=false;
-        if(streaming&&!paused){
-            const delay=Math.max(0,1000/targetFps-lat);
-            delay>0?setTimeout(sendNext,delay):sendNext();
-        }
+        $('pf').style.width=(nextFrameTime/vid.duration*100)+'%';
+        $('tm').textContent=fmt(nextFrameTime)+' / '+fmt(vid.duration);
+        pumpFrames(); /* refill pipeline */
     }catch(e){log('Parse error: '+e.message,'error')}
 }
 

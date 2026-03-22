@@ -2,6 +2,7 @@
 
 #include "processing_pipeline.hpp"
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <mutex>
 #include <unordered_map>
@@ -42,6 +43,36 @@ public:
 
   // Mutex for serializing pipeline execution (required for stateful trackers)
   mutable std::mutex pipeline_mutex;
+
+  // Frame ordering: ensures tracker processes frames in correct order
+  // even when decode+yolo run in parallel
+  mutable std::mutex tracker_mutex;
+  std::condition_variable tracker_cv;
+  int next_tracker_frame = 1; // first frame_id from client is 1
+
+  /**
+   * 等待轮到此帧执行 tracker
+   */
+  void wait_for_turn(int frame_id) {
+    std::unique_lock<std::mutex> lock(tracker_mutex);
+    // 客户端重启时 frame_id 会重置
+    if (frame_id < next_tracker_frame) {
+      next_tracker_frame = frame_id;
+      tracker_cv.notify_all();
+    }
+    tracker_cv.wait(lock, [&] { return frame_id == next_tracker_frame; });
+  }
+
+  /**
+   * 推进到下一帧
+   */
+  void advance_turn() {
+    {
+      std::lock_guard<std::mutex> lock(tracker_mutex);
+      next_tracker_frame++;
+    }
+    tracker_cv.notify_all();
+  }
 };
 
 /**

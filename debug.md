@@ -1,4 +1,4 @@
-# 🐛 TrackFlow 调试日志
+# TrackFlow 调试日志
 
 ## 1. 大图导致服务器崩溃
 **问题**: 处理大分辨率图片时，服务器抛出 `std::bad_alloc` 崩溃。
@@ -58,19 +58,12 @@
 **问题**: 在本地修改了 C++ 代码逻辑（修复解析问题），但服务器运行的还是旧逻辑，没有任何变化，日志也没打出来。
 **原因**: 修改文件后 **忘记了 commit 和 push**。导致远程服务器执行 `git pull` 时提示 "Already up to date"，根本没有拉取到最新的修复代码。此外，有时本地修改导致 pull 失败，需要强制覆盖。
 **解决**:
-- [x] Fix coordinate scaling and ONNX parsing for generic YOLO models <!-- id: 12 -->
-    - [x] Solved "Zombie Process" preventing fix from applying
-    - [x] Solved "Git Pull" silent failure by using `git reset --hard`
-
- Debugging remote GCC Internal Compiler Error (ICE)
-    - [x] Removed `spdlog` to stabilize compiler (replaced with `fprintf`)
-    - [x] Verified ONNX model output accuracy with Python script
-    - [x] Identified 640x640 resolution as bottleneck for 4K detection
-- [/] Re-export model at 1280x1280 and re-test <!-- id: 13 -->
+- 改用 `rsync` 直接同步文件到 GPU 服务器，跳过 git push/pull 流程。
+- 从 VPS 一键部署: `sshpass rsync -avz -e "ssh -p 9022" ... xf@localhost:/home/xf/TrackFlow/`
 
 ## 9. GCC 编译器崩溃 (Internal Compiler Error)
 **问题**: 在远程 WSL 环境编译时，GCC 频繁报错 `internal compiler error: in purge_dead_edges` 或 `cfgrtl.cc` 错误，导致无法生成可执行文件。
-**原因**: 
+**原因**:
 - **Spdlog 模板元编程**: `spdlog` 库大量使用了复杂的模板元编程。
 - **资源限制/环境不稳定**: WSL 环境（尤其是由于内存或系统库限制）无法处理这些复杂的模板展开，导致编译器进程 (`cc1plus`) 内部状态损坏并崩溃。
 - **现象随机**: 错误位置在 `yolo_detector.cpp`, `ws_server.cpp`, 甚至 `main.cpp` 之间随机跳动，只要包含了 `<spdlog/spdlog.h>` 的文件都有可能触发。
@@ -81,26 +74,14 @@
 
 ## 10. 模型文件丢失导致的运行时错误
 **问题**: 编译通过并启动服务器后，前端显示 `Error: Processing failed`。
-### Bounding Box Size/Loose Detection Issue
-- **Observation**: Detected boxes in browser are much larger than vehicles in 4K footage.
-- **Verification**: Python script `verify_model.py` confirms ONNX output is accurate but low resolution (640x640) leads to scaling artifacts on 4K.
-- **Root Cause**: 
-    1. **Discretization**: 1 pixel in 640 becomes 6 pixels in 3840.
-    2. **Model Bias**: Small objects in 4K become tiny at 640, leading the model to "guess" larger boundaries to compensate for uncertainty.
-- **Solution**:
-    1. Re-export ONNX at **1280x1280** to retain 4x more spatial detail.
-    2. Use `simplify=True` and correct `opset` to ensure coordinate interpretation is identical to PyTorch.
-    3. C++ backend will automatically adjust to the new ONNX dimensions at runtime.
 **原因**: 服务器日志显示 `[ERROR] YoloDetector: Failed to load model ... Load model models/yolo26.onnx failed. File doesn't exist`。
 - 配置文件或代码默认指定加载 `models/yolo26.onnx`。
 - 但远程服务器目录中实际并没有这个文件，或者文件名为 `yolo_obb.onnx`。
-**解决**: 
-- 需要确认远程服务器上有哪些模型文件 (`ls -l models/`)。
-**解决**: 
-- 检查发现远程模型实际位于 `/home/xx509/TrackFlow/models/yolo26.onnx`。
-- 修改前端 `test_v4.html`，将发送给服务器的 `model_path` 配置从相对路径 `models/yolo26.onnx` 改为绝对路径 `/home/xx509/TrackFlow/models/yolo26.onnx`，确保无论服务器当前工作目录在哪里都能正确加载。
+**解决**:
+- 检查发现远程模型实际位于 `/home/xf/TrackFlow/models/yolo26.onnx`。
+- 修改 `config/config.yaml`，使用正确的相对路径 `models/yolo26.onnx`，并确保服务器从正确的工作目录 (`/home/xf/TrackFlow`) 启动。
 
-## 11. 检测框过大 (Loose Bounding Boxes) ✅ 已解决
+## 11. 检测框过大 (Loose Bounding Boxes)
 **问题**: 使用 ONNX 模型后，检测框比实际车辆大一圈。
 **原因**:
 - 用户原图为 4K (3840×2160)，但 ONNX 模型输入尺寸为 640×640。
@@ -113,34 +94,81 @@
 - **结果**: 检测框紧贴车辆边缘，精度显著提升
 
 ## 12. WSL GPU 推理环境配置
-**问题**:
-尽管开启了 `use_cuda`，YOLO 推理依然在 CPU 上运行。ONNX Runtime CUDA provider 初始化失败，提示缺少系统库。
-
-**诊断**:
-GPU 服务器 (RTX 4090) 的 WSL 环境中未正确安装 CUDA Toolkit 和 cuDNN 库。
-缺失的库包括: `libcudart`, `libcublas`, `libcublasLt`, `libcufft`, `libcurand`, `libcudnn`。
-
+**问题**: 尽管开启了 `use_cuda`，YOLO 推理依然在 CPU 上运行。ONNX Runtime CUDA provider 初始化失败，提示缺少系统库。
+**诊断**: GPU 服务器 (RTX 4090) 的 WSL 环境中未正确安装 CUDA Toolkit 和 cuDNN 库。缺失的库包括: `libcudart`, `libcublas`, `libcublasLt`, `libcufft`, `libcurand`, `libcudnn`。
 **解决**:
-1. **代码启用 CUDA**:
-   修改 `yolo_detector.cpp`，当 `use_cuda_` 为 true 时正确添加 `OrtCUDAProviderOptions`。
-
+1. **代码启用 CUDA**: 修改 `yolo_detector.cpp`，当 `use_cuda_` 为 true 时正确添加 `OrtCUDAProviderOptions`。
 2. **在 GPU 服务器 (WSL) 上安装依赖**:
    ```bash
-   # 添加 NVIDIA 仓库
    wget https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-keyring_1.1-1_all.deb
    sudo dpkg -i cuda-keyring_1.1-1_all.deb
    sudo apt update
-
-   # 安装 CUDA 11.8 运行时库 (兼容 ONNX Runtime 1.17)
    sudo apt-get install -y cuda-cudart-11-8 libcublas-11-8 libcufft-11-8 libcurand-11-8
-   
-   # 安装 cuDNN
    sudo apt-get install -y nvidia-cudnn
    ```
 
-3. **验证**:
-   服务启动或首次推理时的日志应显示：
-   ```
-   [INFO] YoloDetector: CUDA Execution Provider configured
-   [INFO] YoloDetector: Loaded model '...' (input: 1280x1280, GPU)
-   ```
+## 13. 前端 HTTP 服务器未运行导致页面无法访问
+**问题**: `http://142.171.65.88:8088/test_v4.html` 无法打开，返回空响应。
+**原因**:
+- GPU 服务器上的 `python3 -m http.server 8088` 没有在运行。
+- FRP 客户端虽然配置了 `trackflow-web` 代理 (remotePort: 8088)，但 GPU 本地没有对应的 HTTP 服务在监听。
+- 前端页面通过 FRP 绕行 GPU 服务器不合理——静态文件应该由离用户更近的 VPS 直接提供。
+**解决**:
+- 改为在 VPS 上直接提供前端页面，使用 nginx 反向代理:
+  - `http://142.171.65.88:8080/` → 静态文件 (`/projects/TrackFlow/`)
+  - `http://142.171.65.88:8080/ws` → WebSocket 代理到 `127.0.0.1:9002` (FRP 隧道)
+- 前端 WebSocket URL 从 `ws://host:9002` 改为 `ws://host:8080/ws`（同端口同源，避免跨端口被防火墙拦截）
+
+## 14. WebSocket 跨端口连接失败
+**问题**: 前端页面可以正常打开，但点击 Connect 后 WebSocket 连接失败。
+**原因**:
+- 前端从 VPS 端口 8080 加载，但 WebSocket 连接到端口 9002 (`ws://host:9002`)。
+- 用户的网络环境可能阻止了到非标准端口 9002 的出站连接（企业/校园防火墙常见行为）。
+- 或用户通过 HTTPS 代理访问页面，导致浏览器阻止 `ws://`（非加密 WebSocket）连接（混合内容安全策略）。
+- 从 VPS 本地测试 `ws://142.171.65.88:9002` 正常响应 pong，排除服务端问题。
+**解决**:
+- 在 VPS 上部署 nginx，将前端和 WebSocket 统一到同一端口 8080:
+  ```nginx
+  server {
+      listen 8080;
+      root /projects/TrackFlow;
+      location /ws {
+          proxy_pass http://127.0.0.1:9002;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_read_timeout 86400;
+      }
+  }
+  ```
+- 前端 `connect()` 函数改为使用同源地址:
+  ```javascript
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const url = proto + '://' + location.host + '/ws';
+  ```
+- **优势**: 前端和 WebSocket 同端口同协议，彻底消除跨端口/混合内容问题。
+- **配置文件**: `/etc/nginx/sites-available/trackflow`
+
+## 15. Connect 按钮无反应 (JS 函数缺失)
+**问题**: 前端页面正常加载，但点击 Connect 按钮完全没有反应，没有任何错误提示。
+**原因**:
+- `connect()` 函数第一行调用了 `log('Connecting to ...')`，但 `log()` 函数在 JS 中从未定义。
+- 浏览器抛出 `ReferenceError: log is not defined`，导致 `connect()` 立即终止。
+- 同理，`clearLog()` 也未定义，Log 区域的 Clear 按钮也无法工作。
+- 根本原因: 在重写前端页面时，HTML 中保留了 Log 区域的 DOM 结构和对 `log()`/`clearLog()` 的调用，但 `<script>` 中漏掉了这两个函数的实现。
+**解决**:
+- 在 `<script>` 中添加 `log(msg, type)` 和 `clearLog()` 函数定义。
+- `log()` 将带时间戳的消息追加到 `#logB` 容器中，支持 success/error/warn 样式。
+
+## 16. 跟踪器完全失效 (Track ID 每帧随机变化)
+**问题**: 启用多帧并行推理后，ByteTracker 的目标 ID 每帧都不同，跟踪功能完全丧失。
+**原因** (多层叠加):
+1. **E2E 模型不支持 batch>1**: 原始 ONNX 模型以 `dynamic=False` 导出，输入形状硬编码为 `[1, 3, 1280, 1280]`。当 `BatchInferenceEngine` 尝试将多帧拼成 batch=2/3/4 推理时，ONNX Runtime 报错 `Got invalid dimensions for input: images index: 0 Got: 2 Expected: 1`。虽然有 fallback 逐帧重试，但引入了额外开销和不确定性。
+2. **reset 消息竞态**: 前端在 `startInfer()` 中发送 `{type:'reset'}`，但此时线程池中可能已有正在处理的帧。reset 会清除 session（包括 tracker 状态），导致后续帧在新的空 tracker 上运行，所有历史 ID 丢失。
+3. **并行推理 + 串行 tracker 的帧排序问题**: decode + YOLO 并行执行时，帧到达 tracker 的顺序不确定。如果帧 3 先于帧 2 到达 tracker，ByteTracker 会基于错误的时间顺序进行匹配，导致 ID 跳变。
+**解决 (架构变更)**:
+- **重新导出模型**: 使用 `dynamic=True, batch=4` 重新导出 ONNX，输入形状变为 `[N, 3, 1280, 1280]`，BatchInferenceEngine 可正确执行多帧并行推理。
+- **帧排序机制**: 在 Session 中增加 `wait_for_turn(frame_id)` / `advance_turn()` 条件变量机制，确保 tracker 严格按帧序处理（decode+YOLO 仍然并行）。
+- **修复 reset 竞态**: 前端发送 reset 后，等待服务器返回 `reset_ack` 才开始发送新帧，避免 reset 和推理帧交错。
+- **异常安全**: tracker 阶段用 try/catch 包裹，确保即使 tracker 抛出异常也会调用 `advance_turn()`，防止后续帧死锁。
+**关键教训**: 从串行 pipeline 改为并行架构时，必须同时解决三个问题：(1) 模型的 batch 兼容性、(2) 有状态处理器（tracker）的帧排序、(3) 全局状态操作（reset）的同步。这三者任一缺失都会导致 tracker 失效。

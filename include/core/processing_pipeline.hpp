@@ -26,19 +26,29 @@ public:
    * @return true=所有处理器成功, false=某个处理器失败
    */
   bool execute(ProcessingContext &ctx) {
+    return execute_range(ctx, 0, processors_.size());
+  }
+
+  /**
+   * 执行管道中的一段 [from, to)
+   * 用于分阶段执行: decode+yolo 并行, tracker 串行
+   */
+  bool execute_range(ProcessingContext &ctx, size_t from, size_t to) {
     using Clock = std::chrono::high_resolution_clock;
     auto start = Clock::now();
 
-    for (auto &proc : processors_) {
-      if (!proc->process(ctx)) {
-        fprintf(stderr, "[ERROR] Processor '%s' failed\n", proc->name().c_str());
+    for (size_t i = from; i < to && i < processors_.size(); ++i) {
+      if (!processors_[i]->process(ctx)) {
+        fprintf(stderr, "[ERROR] Processor '%s' failed\n", processors_[i]->name().c_str());
         return false;
       }
     }
 
-    auto end = Clock::now();
-    ctx.total_time_ms =
-        std::chrono::duration<double, std::milli>(end - start).count();
+    if (from == 0 && to >= processors_.size()) {
+      auto end = Clock::now();
+      ctx.total_time_ms =
+          std::chrono::duration<double, std::milli>(end - start).count();
+    }
     return true;
   }
 

@@ -2,12 +2,10 @@
 #include "core/processor_factory.hpp"
 #include <cstdio>
 #include <opencv2/calib3d.hpp>
-#include <opencv2/imgproc.hpp>
 
 namespace yolo_edge {
 
 void UndistortProcessor::configure(const json &config) {
-  // 相机内参矩阵 (必须)
   if (!config.contains("camera_matrix")) {
     fprintf(stderr, "[WARN] UndistortProcessor: No camera_matrix provided, "
                     "will skip undistortion\n");
@@ -26,7 +24,6 @@ void UndistortProcessor::configure(const json &config) {
     K_.at<double>(i / 3, i % 3) = k_data[i];
   }
 
-  // 畸变系数 (必须)
   if (!config.contains("dist_coeffs")) {
     fprintf(stderr, "[ERROR] UndistortProcessor: No dist_coeffs provided\n");
     return;
@@ -38,42 +35,34 @@ void UndistortProcessor::configure(const json &config) {
     dist_.at<double>(0, i) = d_data[i];
   }
 
-  // 图像尺寸 (必须)
-  int width = config.value("width", 1920);
-  int height = config.value("height", 1080);
-
-  // 计算最优新相机矩阵 (可选参数alpha: 0=裁剪所有黑边, 1=保留所有像素)
-  double alpha = config.value("alpha", 0.0);
-  new_K_ = cv::getOptimalNewCameraMatrix(K_, dist_, cv::Size(width, height),
-                                         alpha, cv::Size(width, height));
-
-  // 预计算映射表 (显著加速后续处理)
-  cv::initUndistortRectifyMap(K_, dist_, cv::Mat(), new_K_,
-                              cv::Size(width, height), CV_32FC1, map1_, map2_);
-
   initialized_ = true;
-
-  fprintf(stderr, "[INFO] UndistortProcessor: Initialized for %dx%d images\n",
-          width, height);
+  fprintf(stderr, "[INFO] UndistortProcessor: Initialized (point-only mode)\n");
 }
 
 bool UndistortProcessor::process(ProcessingContext &ctx) {
-  // 如果未初始化或帧为空，跳过
-  if (!initialized_ || ctx.frame.empty()) {
+  if (!initialized_ || ctx.detections.empty()) {
     return true;
   }
 
-  // 使用预计算的映射表进行快速畸变校正
-  cv::Mat undistorted;
-  cv::remap(ctx.frame, undistorted, map1_, map2_, cv::INTER_LINEAR);
-  ctx.frame = undistorted;
+  // 收集所有检测中心点
+  std::vector<cv::Point2f> pts_in;
+  pts_in.reserve(ctx.detections.size());
+  for (const auto &det : ctx.detections) {
+    pts_in.push_back(det.obb.center);
+  }
 
-  // fprintf(stderr, "[DEBUG] UndistortProcessor: Frame undistorted\n");
+  // 批量校正畸变 (只校正点坐标, 不处理整帧图像)
+  std::vector<cv::Point2f> pts_out;
+  cv::undistortPoints(pts_in, pts_out, K_, dist_, cv::noArray(), K_);
+
+  // 写回校正后的中心点
+  for (size_t i = 0; i < ctx.detections.size(); ++i) {
+    ctx.detections[i].obb.center = pts_out[i];
+  }
 
   return true;
 }
 
-// 注册处理器
 REGISTER_PROCESSOR("undistort", UndistortProcessor);
 
 } // namespace yolo_edge

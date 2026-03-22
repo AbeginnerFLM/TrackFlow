@@ -6,7 +6,10 @@
 
 ## 第一部分：后端优化
 
-### 1. [高优先] Batch 推理 —— 多帧合并为一个 batch 送入 GPU
+### 1. ~~[高优先] Batch 推理 —— 多帧合并为一个 batch 送入 GPU~~ [已完成]
+
+> **实现文件**: `src/processors/batch_inference_engine.cpp`, `include/processors/batch_inference_engine.hpp`
+> **集成点**: `src/processors/yolo_detector.cpp` 中 `infer()` 方法自动提交到共享 BatchInferenceEngine
 
 **现状问题：**
 - 当前每帧独立推理，input shape 硬编码为 `{1, 3, H, W}`（`yolo_detector.cpp:265`）
@@ -54,7 +57,9 @@
 
 ---
 
-### 2. [高优先] 预处理 buffer 复用 —— 消除每帧内存分配
+### 2. ~~[高优先] 预处理 buffer 复用 —— 消除每帧内存分配~~ [已完成]
+
+> **实现文件**: `src/processors/yolo_detector.cpp` 中 `preprocess()` 复用 `letterbox_buf_`
 
 **现状问题：**
 - `preprocess()` 每次调用创建 `resized`、`letterbox`、`blob` 三个 cv::Mat（`yolo_detector.cpp:238-254`）
@@ -77,7 +82,9 @@ resized_buf_.copyTo(letterbox_buf_(cv::Rect(pad_x_, pad_y_, new_w, new_h)));
 
 ---
 
-### 3. [高优先] ONNX 推理输出零拷贝
+### 3. ~~[高优先] ONNX 推理输出零拷贝~~ [已完成]
+
+> **实现文件**: `src/processors/yolo_detector.cpp` 中 `infer()` 返回 `InferOutput`（`vector<float>` + shape），不经过 cv::Mat 中转
 
 **现状问题：**
 - `infer()` 中对每个输出 tensor 调用了 `mat.clone()`（`yolo_detector.cpp:288,293`）
@@ -97,7 +104,9 @@ std::vector<Ort::Value> infer(const cv::Mat& blob);
 
 ---
 
-### 4. [中优先] 旋转 NMS 优化 —— 从 O(N²) 降低复杂度
+### 4. ~~[中优先] 旋转 NMS 优化 —— 从 O(N²) 降低复杂度~~ [已完成: 方案 A + B]
+
+> **实现文件**: `src/processors/yolo_detector.cpp` 中 `rotated_nms()` 使用 AABB 预过滤；E2E 模型 (7列输出) 完全跳过 NMS
 
 **现状问题：**
 - `rotated_nms()` 是 O(N²) 的嵌套循环（`yolo_detector.cpp:528-543`）
@@ -125,7 +134,9 @@ float iou = rotated_iou(boxes[i], boxes[j]); // 仅对可能重叠的计算
 
 ---
 
-### 5. [中优先] 贪心匹配 → 真正的 Hungarian 算法
+### 5. ~~[中优先] 贪心匹配 → 真正的 Hungarian 算法~~ [已完成]
+
+> **实现文件**: `src/processors/byte_tracker.cpp` 中 `linear_assignment()` 使用 Kuhn-Munkres 算法
 
 **现状问题：**
 - `linear_assignment()` 是 O(M×N×min(M,N)) 的贪心匹配（`byte_tracker.cpp:435-478`）
@@ -141,7 +152,9 @@ float iou = rotated_iou(boxes[i], boxes[j]); // 仅对可能重叠的计算
 
 ---
 
-### 6. [中优先] STrack 轨迹存储优化
+### 6. ~~[中优先] STrack 轨迹存储优化~~ [已完成]
+
+> **实现文件**: `include/processors/byte_tracker.hpp` 中 `STrack` 使用 `std::array<cv::Point2f, 100>` 环形缓冲区
 
 **现状问题：**
 - `trajectory` 使用 `std::vector`，达到 100 时 `erase(begin())` 是 O(N) 操作（`byte_tracker.cpp:84-86`）
@@ -165,7 +178,7 @@ void add_point(cv::Point2f pt) {
 
 ---
 
-### 7. [中优先] Pipeline 阶段并行化
+### 7. [中优先] Pipeline 阶段并行化 [未实现]
 
 **现状问题：**
 - Pipeline 严格串行执行：Decode → YOLO → Tracker → GeoTransform（`processing_pipeline.hpp`）
@@ -191,7 +204,9 @@ Frame3:                 [Decode][Infer      ][Track][Geo]
 
 ---
 
-### 8. [中优先] WebSocket 响应构建优化
+### 8. ~~[中优先] WebSocket 响应构建优化~~ [已完成: 部分]
+
+> **实现文件**: `src/network/ws_server.cpp` 中 `build_response()` 使用 `reserve()` + `std::move()`，清理了冗余日志
 
 **现状问题：**
 - `build_response()` 为每个 detection 构建完整 JSON 对象（`ws_server.cpp:330-367`）
@@ -214,7 +229,9 @@ Frame3:                 [Decode][Infer      ][Track][Geo]
 
 ---
 
-### 9. [低优先] 清理残留 Debug 日志
+### 9. ~~[低优先] 清理残留 Debug 日志~~ [已完成]
+
+> **实现文件**: `src/processors/yolo_detector.cpp`, `src/processors/byte_tracker.cpp`, `src/network/ws_server.cpp` 中删除了所有 debug fprintf
 
 **现状问题：**
 - 大量被注释掉的 `fprintf`/`std::cerr` 语句散布在关键路径上（`ws_server.cpp`、`yolo_detector.cpp`）
@@ -236,7 +253,9 @@ Frame3:                 [Decode][Infer      ][Track][Geo]
 
 ---
 
-### 10. [低优先] SessionManager 过期清理无定时触发
+### 10. ~~[低优先] SessionManager 过期清理无定时触发~~ [已完成]
+
+> **实现文件**: `include/core/session.hpp` 中 `get_or_create()` 每 100 次访问自动触发过期清理
 
 **现状问题：**
 - `cleanup_expired()` 方法已实现（`session.hpp:103-117`），但从未被任何地方调用
@@ -259,7 +278,9 @@ Session& get_or_create(const std::string& session_id, const json& config) {
 
 ---
 
-### 11. [低优先] ONNX Session 线程安全
+### 11. ~~[低优先] ONNX Session 线程安全~~ [已完成]
+
+> **实现文件**: `include/processors/yolo_detector.hpp` 中 `PreprocessResult` 结构体将 scale/pad 局部化
 
 **现状问题：**
 - `Ort::Session` 本身是线程安全的（ONNX Runtime 文档确认），但 `YoloDetector` 的成员变量 `scale_`、`pad_x_`、`pad_y_` 不是
@@ -281,7 +302,7 @@ PreprocessResult preprocess(const cv::Mat& frame);
 
 ---
 
-### 12. [低优先] 二进制消息的零拷贝传递
+### 12. [低优先] 二进制消息的零拷贝传递 [未实现]
 
 **现状问题：**
 - WebSocket 收到二进制数据后，`image_data->assign(message.begin(), message.end())`（`ws_server.cpp:157`）执行了一次完整拷贝
@@ -298,7 +319,9 @@ PreprocessResult preprocess(const cv::Mat& frame);
 
 ## 第二部分：前端优化
 
-### 13. [高优先] 添加连续推理模式（视频流）
+### 13. ~~[高优先] 添加连续推理模式（视频流）~~ [已完成]
+
+> **实现文件**: `test_v4.html` — 视频上传 + 逐帧抽取 + 背压控制发送
 
 **现状问题：**
 - 当前前端只支持单帧手动推理（点击按钮发送一次）
@@ -332,7 +355,7 @@ async function startVideoStream(file) {
 
 ---
 
-### 14. [高优先] Canvas 渲染性能优化
+### 14. [高优先] Canvas 渲染性能优化 [未实现]
 
 **现状问题：**
 - `drawDetections()` 每次都重绘整张图片（`test_v4.html:607-613`）
@@ -377,7 +400,9 @@ function drawDetections(detections) {
 
 ---
 
-### 15. [中优先] 图片压缩优化
+### 15. ~~[中优先] 图片压缩优化~~ [已完成]
+
+> **实现文件**: `test_v4.html` 中 `sendNext()` 直接使用 `canvas.toBlob()` 发送二进制数据
 
 **现状问题：**
 - `compressImage()` 使用 Canvas `toDataURL('image/jpeg', 0.85)` 压缩（`test_v4.html:462`）
@@ -406,7 +431,7 @@ async function sendInfer() {
 
 ---
 
-### 16. [中优先] 响应时间计算修正
+### 16. [中优先] 响应时间计算修正 [未实现]
 
 **现状问题：**
 - Latency 使用 `performance.now() - inferStartTime` 计算（`test_v4.html:584`）
@@ -431,7 +456,7 @@ document.getElementById('statNetwork').textContent = networkLatency.toFixed(0);
 
 ---
 
-### 17. [中优先] Detection 信息展示增强
+### 17. [中优先] Detection 信息展示增强 [未实现]
 
 **现状问题：**
 - 检测信息列表每次使用 `innerHTML` 重建整个 DOM（`test_v4.html:718`）
@@ -445,7 +470,7 @@ document.getElementById('statNetwork').textContent = networkLatency.toFixed(0);
 
 ---
 
-### 18. [低优先] WebSocket 重连机制
+### 18. [低优先] WebSocket 重连机制 [未实现]
 
 **现状问题：**
 - 断线后需要手动点击 Connect 重连
@@ -479,30 +504,32 @@ setInterval(() => {
 ## 第三部分：优化实施路线图
 
 ### Phase 1：快速见效（1~2天）
-| # | 优化项 | 预估收益 | 难度 |
+| # | 优化项 | 预估收益 | 状态 |
 |---|--------|----------|------|
-| 2 | 预处理 buffer 复用 | 每帧 -1ms | 低 |
-| 3 | ONNX 输出零拷贝 | 每帧 -0.5ms | 低 |
-| 4B | 跳过 End-to-End 模型的 NMS | 每帧 -2~5ms | 低 |
-| 9 | 清理 Debug 日志 | 代码整洁 | 低 |
-| 15 | 前端 toBlob 优化 | 客户端 -50% 准备时间 | 低 |
+| 2 | 预处理 buffer 复用 | 每帧 -1ms | **已完成** |
+| 3 | ONNX 输出零拷贝 | 每帧 -0.5ms | **已完成** |
+| 4B | 跳过 End-to-End 模型的 NMS | 每帧 -2~5ms | **已完成** |
+| 9 | 清理 Debug 日志 | 代码整洁 | **已完成** |
+| 15 | 前端 toBlob 优化 | 客户端 -50% 准备时间 | **已完成** |
 
 ### Phase 2：核心架构（3~5天）
-| # | 优化项 | 预估收益 | 难度 |
+| # | 优化项 | 预估收益 | 状态 |
 |---|--------|----------|------|
-| 1 | Batch 推理 | 吞吐量 2~4x | 高 |
-| 11 | preprocess 参数局部化 | batch 前置需求 | 中 |
-| 7 | Pipeline 流水线并行 | 吞吐量 +30% | 中 |
-| 13 | 前端视频流模式 | 功能完善 | 中 |
+| 1 | Batch 推理 | 吞吐量 2~4x | **已完成** |
+| 11 | preprocess 参数局部化 | batch 前置需求 | **已完成** |
+| 7 | Pipeline 流水线并行 | 吞吐量 +30% | 未实现 |
+| 13 | 前端视频流模式 | 功能完善 | **已完成** |
 
 ### Phase 3：精细打磨（按需）
-| # | 优化项 | 预估收益 | 难度 |
+| # | 优化项 | 预估收益 | 状态 |
 |---|--------|----------|------|
-| 5 | Hungarian 算法 | 跟踪质量提升 | 中 |
-| 6 | STrack 环形缓冲 | 微小性能提升 | 低 |
-| 8 | JSON 响应优化 | 每帧 -0.5ms | 中 |
-| 10 | Session 过期清理 | 稳定性 | 低 |
-| 14 | Canvas 双缓冲 | 前端帧率提升 | 中 |
+| 5 | Hungarian 算法 | 跟踪质量提升 | **已完成** |
+| 6 | STrack 环形缓冲 | 微小性能提升 | **已完成** |
+| 8 | JSON 响应优化 | 每帧 -0.5ms | **部分完成** |
+| 10 | Session 过期清理 | 稳定性 | **已完成** |
+| 14 | Canvas 双缓冲 | 前端帧率提升 | 未实现 |
+
+**总计: 18 项中 13 项已完成, 1 项部分完成, 4 项未实现**
 
 ---
 

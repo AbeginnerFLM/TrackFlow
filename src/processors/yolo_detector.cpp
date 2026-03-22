@@ -73,7 +73,69 @@ void YoloDetector::configure(const json &config) {
 // ============================================================================
 void YoloDetector::load_model() {
   try {
-    // 尝试使用 BatchInferenceEngine (共享 GPU 会话)
+    // Step 1: 创建本地 session 读取模型元数据 (input shape)
+    Ort::SessionOptions session_options;
+    session_options.SetIntraOpNumThreads(4);
+    session_options.SetGraphOptimizationLevel(
+        GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+    bool cuda_enabled = false;
+    if (use_cuda_) {
+      try {
+        OrtCUDAProviderOptions cuda_options;
+        cuda_options.device_id = 0;
+        cuda_options.arena_extend_strategy = 0;
+        cuda_options.gpu_mem_limit = 0;
+        cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
+        cuda_options.do_copy_in_default_stream = 1;
+        session_options.AppendExecutionProvider_CUDA(cuda_options);
+        cuda_enabled = true;
+      } catch (const Ort::Exception &e) {
+        fprintf(stderr,
+                "[WARN] Failed to enable CUDA: %s, falling back to CPU\n",
+                e.what());
+      }
+    }
+
+    ort_->session = std::make_unique<Ort::Session>(
+        ort_->env, model_path_.c_str(), session_options);
+
+    Ort::AllocatorWithDefaultOptions allocator;
+
+    size_t num_inputs = ort_->session->GetInputCount();
+    for (size_t i = 0; i < num_inputs; ++i) {
+      auto name = ort_->session->GetInputNameAllocated(i, allocator);
+      ort_->input_names_storage.push_back(name.get());
+      ort_->input_names.push_back(ort_->input_names_storage.back().c_str());
+
+      auto type_info = ort_->session->GetInputTypeInfo(i);
+      auto shape_info = type_info.GetTensorTypeAndShapeInfo();
+      ort_->input_shape = shape_info.GetShape();
+    }
+
+    size_t num_outputs = ort_->session->GetOutputCount();
+    for (size_t i = 0; i < num_outputs; ++i) {
+      auto name = ort_->session->GetOutputNameAllocated(i, allocator);
+      ort_->output_names_storage.push_back(name.get());
+      ort_->output_names.push_back(ort_->output_names_storage.back().c_str());
+    }
+
+    // 从模型元数据更新 input dimensions
+    if (ort_->input_shape.size() >= 4) {
+      if (ort_->input_shape[2] > 0)
+        input_height_ = ort_->input_shape[2];
+      if (ort_->input_shape[3] > 0)
+        input_width_ = ort_->input_shape[3];
+    }
+
+    fprintf(stderr, "[INFO] Loaded model '%s' (input: %dx%d, %s)\n",
+            model_path_.c_str(), input_width_, input_height_,
+            cuda_enabled ? "GPU" : "CPU");
+
+    // Step 2: 预分配 letterbox buffer (必须在 warmup 之前)
+    letterbox_buf_ = cv::Mat(input_height_, input_width_, CV_8UC3);
+
+    // Step 3: 尝试 BatchInferenceEngine (使用正确的 dimensions)
     auto &batch_engine = BatchInferenceEngine::instance();
     if (!batch_engine.is_initialized()) {
       batch_engine.init(model_path_, input_height_, input_width_, use_cuda_,
@@ -82,77 +144,13 @@ void YoloDetector::load_model() {
 
     if (batch_engine.is_initialized()) {
       use_batch_engine_ = true;
+      // 释放本地 session (BatchEngine 有自己的)
+      ort_->session.reset();
       fprintf(stderr,
               "[INFO] YoloDetector: Using shared BatchInferenceEngine\n");
     } else {
-      // BatchEngine 初始化失败, 回退到本地 session
       use_batch_engine_ = false;
-      fprintf(stderr,
-              "[WARN] BatchEngine init failed, falling back to local session\n");
-    }
-
-    // 仍然需要本地 session 获取模型元数据 (input shape) 和作为回退
-    if (!use_batch_engine_) {
-      Ort::SessionOptions session_options;
-      session_options.SetIntraOpNumThreads(4);
-      session_options.SetGraphOptimizationLevel(
-          GraphOptimizationLevel::ORT_ENABLE_ALL);
-
-      bool cuda_enabled = false;
-      if (use_cuda_) {
-        try {
-          OrtCUDAProviderOptions cuda_options;
-          cuda_options.device_id = 0;
-          cuda_options.arena_extend_strategy = 0;
-          cuda_options.gpu_mem_limit = 0;
-          cuda_options.cudnn_conv_algo_search =
-              OrtCudnnConvAlgoSearchExhaustive;
-          cuda_options.do_copy_in_default_stream = 1;
-          session_options.AppendExecutionProvider_CUDA(cuda_options);
-          cuda_enabled = true;
-        } catch (const Ort::Exception &e) {
-          fprintf(stderr,
-                  "[WARN] Failed to enable CUDA: %s, falling back to CPU\n",
-                  e.what());
-        }
-      }
-
-      ort_->session = std::make_unique<Ort::Session>(
-          ort_->env, model_path_.c_str(), session_options);
-
-      Ort::AllocatorWithDefaultOptions allocator;
-
-      size_t num_inputs = ort_->session->GetInputCount();
-      for (size_t i = 0; i < num_inputs; ++i) {
-        auto name = ort_->session->GetInputNameAllocated(i, allocator);
-        ort_->input_names_storage.push_back(name.get());
-        ort_->input_names.push_back(ort_->input_names_storage.back().c_str());
-
-        auto type_info = ort_->session->GetInputTypeInfo(i);
-        auto shape_info = type_info.GetTensorTypeAndShapeInfo();
-        ort_->input_shape = shape_info.GetShape();
-      }
-
-      size_t num_outputs = ort_->session->GetOutputCount();
-      for (size_t i = 0; i < num_outputs; ++i) {
-        auto name = ort_->session->GetOutputNameAllocated(i, allocator);
-        ort_->output_names_storage.push_back(name.get());
-        ort_->output_names.push_back(
-            ort_->output_names_storage.back().c_str());
-      }
-
-      if (ort_->input_shape.size() >= 4) {
-        if (ort_->input_shape[2] > 0)
-          input_height_ = ort_->input_shape[2];
-        if (ort_->input_shape[3] > 0)
-          input_width_ = ort_->input_shape[3];
-      }
-
-      fprintf(stderr, "[INFO] Loaded model '%s' (input: %dx%d, %s)\n",
-              model_path_.c_str(), input_width_, input_height_,
-              cuda_enabled ? "GPU" : "CPU");
-
-      // Warmup
+      // Warmup 本地 session
       if (cuda_enabled) {
         fprintf(stderr, "[INFO] Warming up CUDA engine...\n");
         cv::Mat dummy(input_height_, input_width_, CV_8UC3,
@@ -162,9 +160,6 @@ void YoloDetector::load_model() {
         fprintf(stderr, "[INFO] Warmup complete.\n");
       }
     }
-
-    // 预分配 letterbox buffer
-    letterbox_buf_ = cv::Mat(input_height_, input_width_, CV_8UC3);
 
     initialized_ = true;
 
@@ -224,6 +219,13 @@ bool YoloDetector::process(ProcessingContext &ctx) {
 PreprocessResult YoloDetector::preprocess(const cv::Mat &frame) {
   PreprocessResult result;
 
+  // Thread-local buffer for concurrent preprocess (batch pipeline)
+  thread_local cv::Mat letterbox_buf;
+  if (letterbox_buf.rows != input_height_ || letterbox_buf.cols != input_width_ ||
+      letterbox_buf.type() != CV_8UC3) {
+    letterbox_buf.create(input_height_, input_width_, CV_8UC3);
+  }
+
   int img_w = frame.cols;
   int img_h = frame.rows;
 
@@ -241,14 +243,14 @@ PreprocessResult YoloDetector::preprocess(const cv::Mat &frame) {
   cv::Mat resized;
   cv::resize(frame, resized, cv::Size(new_w, new_h));
 
-  // 复用 letterbox buffer (填充灰色 + 粘贴缩放图)
-  letterbox_buf_.setTo(cv::Scalar(114, 114, 114));
+  // 填充灰色 + 粘贴缩放图
+  letterbox_buf.setTo(cv::Scalar(114, 114, 114));
   resized.copyTo(
-      letterbox_buf_(cv::Rect(result.pad_x, result.pad_y, new_w, new_h)));
+      letterbox_buf(cv::Rect(result.pad_x, result.pad_y, new_w, new_h)));
 
   // BGR -> RGB
   cv::Mat rgb;
-  cv::cvtColor(letterbox_buf_, rgb, cv::COLOR_BGR2RGB);
+  cv::cvtColor(letterbox_buf, rgb, cv::COLOR_BGR2RGB);
 
   // 归一化到 [0, 1]
   rgb.convertTo(rgb, CV_32F, 1.0 / 255.0);
