@@ -66,8 +66,10 @@ WebSocket Server (线程池)
 
 | 资源 | 地址 | 认证 |
 |------|------|------|
-| 前端 (远程) | `http://142.171.65.88:8080/test_v4.html` | 无 |
-| 前端 (本机) | `http://localhost:8080/test_v4.html` | 无 |
+| 前端 v4 (远程) | `http://142.171.65.88:8080/test_v4.html` | 无 |
+| 前端 v5 (远程) | `http://142.171.65.88:8080/test_v5.html` | 无 |
+| 前端 v4 (本机) | `http://localhost:8080/test_v4.html` | 无 |
+| 前端 v5 (本机) | `http://localhost:8080/test_v5.html` | 无 |
 | WebSocket | `ws://<host>:8080/ws` (nginx 反代, 同源自动路由) | 无 |
 | GPU SSH (从 VPS) | `ssh -p 9022 xf@localhost` | 密码: `123456xf` |
 | GPU SSH (直接) | `ssh 10.6.22.1` → `wsl` → `su - xf` | Windows: `4090`, xf: `123456xf` |
@@ -85,7 +87,7 @@ sshpass -p '123456xf' rsync -avz \
   -e "ssh -o StrictHostKeyChecking=no -p 9022" \
   --exclude='.git' --exclude='build/' --exclude='.cache/' --exclude='third_party/' \
   --include='src/***' --include='include/***' --include='config/***' \
-  --include='CMakeLists.txt' --include='test_v4.html' --exclude='*' \
+  --include='CMakeLists.txt' --include='test_v4.html' --include='test_v5.html' --exclude='*' \
   ./ xf@localhost:/home/xf/TrackFlow/
 
 # 2. 杀死旧进程 + 重新编译 + 启动
@@ -170,12 +172,58 @@ systemctl restart nginx
    - `9002`: VPS 上的 FRP 映射端口 (VPS nginx 内部转发到此, 客户端不直接访问)
    - `9022`: VPS 上的 FRP SSH 端口 (映射到 GPU WSL 的 SSH)
 4. **模型文件**: 当前使用 `yolo26_4batch.onnx`，支持动态 batch (N=1~4)。如更换模型需同时更新 `config/config.yaml` 中的 `model_path`
-5. **本机 nginx 权限**: WSL 中 nginx 以 www-data 运行，需要 `/home/xf` 目录有 o+x 权限，`test_v4.html` 有 o+r 权限
+5. **本机 nginx 权限**: WSL 中 nginx 以 www-data 运行，需要 `/home/xf` 目录有 o+x 权限，HTML 文件有 o+r 权限
    ```bash
    sudo chmod o+x /home/xf
    sudo chmod o+x /home/xf/TrackFlow
    sudo chmod o+r /home/xf/TrackFlow/test_v4.html
+   sudo chmod o+r /home/xf/TrackFlow/test_v5.html
    ```
+
+## 前端 v5 架构 (test_v5.html)
+
+v5 在 v4 基础上新增了完整的坐标转换、车道检测和车辆分析功能，**所有新功能在前端 JS 中实现，后端无需改动**。
+
+### 布局
+```
+┌─ TopBar ──────────────────────────────────────────────────┐
+├──────────────────────────────┬──┬─────────────────────────┤
+│                              │拖│  Tabs:                  │
+│      Video Player            │拽│  · Vehicles (轨迹+属性) │
+│      (canvas + overlays)     │条│  · Settings (矩阵+校正) │
+│                              │  │  · Lanes (车道配置)     │
+├──────────────────────────────┤  │  · Data (CSV导出)      │
+│  Timeline + Toolbar          │  │                         │
+├──────────────────────────────┼──┴─────────────────────────┤
+│  Stats (Latency/FPS/Objects) │                            │
+├──────────────────────────────┴────────────────────────────┤
+│  Log (可折叠)                                             │
+└───────────────────────────────────────────────────────────┘
+```
+
+### 前端新增模块 (纯 JS，无外部依赖)
+
+| 模块 | 功能 | 对应原型 (`traj_keyong.py`) |
+|------|------|-----------------------------|
+| 坐标转换 | 像素→地面坐标 (单应性矩阵 3x3) | `image_to_ground()` / `cv2.perspectiveTransform` |
+| 畸变校正 | Brown 模型迭代反畸变 | `cv2.undistortPoints` |
+| UTM↔WGS84 | 纯公式实现，无需 pyproj | `utm_to_lonlat()` / pyproj |
+| 车道检测 | ray-casting 点-多边形测试 | `cv2.pointPolygonTest` |
+| 车辆跟踪面板 | 轨迹绘制 + 速度/方向/经纬度显示 | `update_vehicle_info()` |
+| 数据导出 | CSV 格式（车辆数据 + 车道统计） | `export_data()` |
+
+### 数据流
+```
+后端 WebSocket 返回 JSON (detections + track_id)
+    │
+    ▼ 前端 JS
+    ├── 更新 vehicleTracks (中心点、帧ID)
+    ├── imageToGround() → 地面坐标 (m)
+    ├── groundToLatLon() → WGS84 经纬度
+    ├── 计算速度 (px/s, m/s, km/h) + 方向
+    ├── updateLaneStats() → 车道流量统计
+    └── draw() → Canvas 分层渲染 (检测框→轨迹→车道)
+```
 
 ## 目录结构
 
@@ -196,7 +244,8 @@ systemctl restart nginx
 | `include/core/session.hpp` | 会话管理，per-session pipeline + 帧排序机制 |
 | `include/core/processing_pipeline.hpp` | 管线框架，支持 `execute_range()` 分段执行 |
 | `config/config.yaml` | 运行时配置 (端口、线程数、模型路径) |
-| `test_v4.html` | 前端页面 (视频推理 + 可视化, MAX_INFLIGHT=4) |
+| `test_v4.html` | 前端页面 v4 (基础视频推理 + 可视化, MAX_INFLIGHT=4) |
+| `test_v5.html` | 前端页面 v5 (v4 + 坐标转换/畸变校正/车道检测/车辆跟踪面板/数据导出) |
 | `export_onnx.py` | ONNX 导出脚本 (支持动态 batch) |
 | `optimization.md` | 优化方案文档 (含完成状态标记) |
 | `debug.md` | 调试日志 (历史问题及解决方案) |
