@@ -1,11 +1,9 @@
 #include "processors/geo_transformer.hpp"
 #include "core/processor_factory.hpp"
 #include <chrono>
-#include <cmath>
 #include <cstdio>
 #include <opencv2/calib3d.hpp>
 
-// 包含PROJ头文件 (只在cpp中)
 #include <proj.h>
 
 namespace yolo_edge {
@@ -22,7 +20,6 @@ GeoTransformer::~GeoTransformer() {
 }
 
 void GeoTransformer::configure(const json &config) {
-  // 单应矩阵 (必须)
   if (!config.contains("homography")) {
     fprintf(stderr, "[WARN] GeoTransformer: No homography matrix provided, "
                     "will skip transformation\n");
@@ -41,7 +38,6 @@ void GeoTransformer::configure(const json &config) {
     H_.at<double>(i / 3, i % 3) = h_data[i];
   }
 
-  // 原点经纬度 (必须)
   if (!config.contains("origin_lon") || !config.contains("origin_lat")) {
     fprintf(stderr,
             "[ERROR] GeoTransformer: Missing origin_lon or origin_lat\n");
@@ -51,7 +47,6 @@ void GeoTransformer::configure(const json &config) {
   origin_lon_ = config["origin_lon"].get<double>();
   origin_lat_ = config["origin_lat"].get<double>();
 
-  // 相机参数 (可选)
   if (config.contains("camera_matrix") && config.contains("dist_coeffs")) {
     auto k_data = config["camera_matrix"].get<std::vector<double>>();
     if (k_data.size() == 9) {
@@ -67,7 +62,6 @@ void GeoTransformer::configure(const json &config) {
       }
 
       has_camera_params_ = true;
-      fprintf(stderr, "[DEBUG] GeoTransformer: Camera parameters loaded\n");
     }
   }
 
@@ -80,15 +74,12 @@ void GeoTransformer::configure(const json &config) {
 }
 
 void GeoTransformer::init_proj() {
-  // 创建PROJ上下文
   proj_ctx_ = proj_context_create();
 
-  // 计算UTM区号
   int zone = static_cast<int>((origin_lon_ + 180.0) / 6.0) + 1;
   bool is_north = origin_lat_ >= 0;
   int epsg = is_north ? (32600 + zone) : (32700 + zone);
 
-  // 创建坐标转换器: UTM -> WGS84
   std::string utm_def = "EPSG:" + std::to_string(epsg);
   proj_ = proj_create_crs_to_crs(static_cast<PJ_CONTEXT *>(proj_ctx_),
                                  utm_def.c_str(), "EPSG:4326", nullptr);
@@ -99,24 +90,18 @@ void GeoTransformer::init_proj() {
     return;
   }
 
-  // 计算原点的UTM坐标
   PJ_COORD origin_wgs84 = proj_coord(origin_lon_, origin_lat_, 0, 0);
   PJ_COORD origin_utm =
       proj_trans(static_cast<PJ *>(proj_), PJ_INV, origin_wgs84);
   origin_utm_x_ = origin_utm.xy.x;
   origin_utm_y_ = origin_utm.xy.y;
-
-  fprintf(stderr, "[DEBUG] GeoTransformer: Origin UTM (%.2f, %.2f) Zone %d%s\n",
-          origin_utm_x_, origin_utm_y_, zone, is_north ? "N" : "S");
 }
 
 std::pair<double, double> GeoTransformer::utm_to_lonlat(double easting,
                                                         double northing) {
-  // 相对坐标转换为绝对UTM坐标
   double world_x = easting + origin_utm_x_;
   double world_y = northing + origin_utm_y_;
 
-  // UTM -> WGS84
   PJ_COORD utm = proj_coord(world_x, world_y, 0, 0);
   PJ_COORD lonlat = proj_trans(static_cast<PJ *>(proj_), PJ_FWD, utm);
 
@@ -124,7 +109,6 @@ std::pair<double, double> GeoTransformer::utm_to_lonlat(double easting,
 }
 
 bool GeoTransformer::process(ProcessingContext &ctx) {
-  // 如果未初始化或没有检测结果，直接返回成功
   if (!initialized_ || ctx.detections.empty()) {
     return true;
   }
@@ -132,28 +116,28 @@ bool GeoTransformer::process(ProcessingContext &ctx) {
   using Clock = std::chrono::high_resolution_clock;
   auto start = Clock::now();
 
-  for (auto &det : ctx.detections) {
-    // 1. 获取bbox中心点
-    cv::Point2f center = det.obb.center;
+  std::vector<cv::Point2f> centers;
+  centers.reserve(ctx.detections.size());
+  for (const auto &det : ctx.detections) {
+    centers.push_back(det.obb.center);
+  }
 
-    // 2. 畸变校正 (如果有相机参数)
-    if (has_camera_params_) {
-      std::vector<cv::Point2f> pts_in = {center};
-      std::vector<cv::Point2f> pts_out;
-      cv::undistortPoints(pts_in, pts_out, K_, dist_, cv::noArray(), K_);
-      center = pts_out[0];
-    }
+  // 难点：畸变校正和单应变换都支持向量化，批量处理能明显减少小对象分配。
+  if (has_camera_params_) {
+    std::vector<cv::Point2f> undistorted;
+    cv::undistortPoints(centers, undistorted, K_, dist_, cv::noArray(), K_);
+    centers = std::move(undistorted);
+  }
 
-    // 3. 透视变换: 像素坐标 -> 地面坐标 (相对原点的米)
-    std::vector<cv::Point2f> src = {center};
-    std::vector<cv::Point2f> dst;
-    cv::perspectiveTransform(src, dst, H_);
+  std::vector<cv::Point2f> ground_points;
+  cv::perspectiveTransform(centers, ground_points, H_);
 
-    det.ground_x = dst[0].x;
-    det.ground_y = dst[0].y;
-
-    // 4. UTM -> 经纬度
-    auto [lon, lat] = utm_to_lonlat(dst[0].x, dst[0].y);
+  for (size_t i = 0; i < ctx.detections.size(); ++i) {
+    auto &det = ctx.detections[i];
+    const auto &ground = ground_points[i];
+    det.ground_x = ground.x;
+    det.ground_y = ground.y;
+    auto [lon, lat] = utm_to_lonlat(ground.x, ground.y);
     det.lon = lon;
     det.lat = lat;
   }
@@ -162,14 +146,9 @@ bool GeoTransformer::process(ProcessingContext &ctx) {
   ctx.geo_time_ms =
       std::chrono::duration<double, std::milli>(end - start).count();
 
-  // fprintf(stderr, "[DEBUG] GeoTransformer: Transformed %zu detections in
-  // %.2fms\n",
-  //               ctx.detections.size(), ctx.geo_time_ms);
-
   return true;
 }
 
-// 注册处理器
 REGISTER_PROCESSOR("geo_transform", GeoTransformer);
 
 } // namespace yolo_edge

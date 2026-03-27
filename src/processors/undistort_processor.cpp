@@ -44,18 +44,16 @@ bool UndistortProcessor::process(ProcessingContext &ctx) {
     return true;
   }
 
-  // 收集所有检测中心点
   std::vector<cv::Point2f> pts_in;
   pts_in.reserve(ctx.detections.size());
   for (const auto &det : ctx.detections) {
     pts_in.push_back(det.obb.center);
   }
 
-  // 批量校正畸变 (只校正点坐标, 不处理整帧图像)
+  // 关键点：只矫正检测中心点，避免整帧 undistort 带来的额外 CPU/内存开销。
   std::vector<cv::Point2f> pts_out;
   cv::undistortPoints(pts_in, pts_out, K_, dist_, cv::noArray(), K_);
 
-  // 写回校正后的中心点
   for (size_t i = 0; i < ctx.detections.size(); ++i) {
     ctx.detections[i].obb.center = pts_out[i];
   }

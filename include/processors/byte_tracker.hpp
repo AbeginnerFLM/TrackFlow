@@ -2,7 +2,6 @@
 
 #include "core/image_processor.hpp"
 #include <array>
-#include <map>
 #include <opencv2/video/tracking.hpp>
 #include <vector>
 
@@ -15,9 +14,6 @@ enum class TrackState {
   Removed = 3
 };
 
-/**
- * 单个跟踪对象 (环形缓冲区优化轨迹存储)
- */
 struct STrack {
   int track_id = 0;
   TrackState state = TrackState::New;
@@ -29,11 +25,9 @@ struct STrack {
   float score = 0.0f;
   int class_id = 0;
 
-  // 卡尔曼滤波器状态
   cv::KalmanFilter kf;
   bool kf_initialized = false;
 
-  // 环形缓冲区轨迹 (替代 vector + erase(begin()))
   static constexpr int MAX_TRAJECTORY = 100;
   std::array<cv::Point2f, MAX_TRAJECTORY> trajectory_buf{};
   int traj_head = 0;
@@ -52,9 +46,6 @@ struct STrack {
   cv::RotatedRect get_predicted_bbox() const;
 };
 
-/**
- * ByteTrack跟踪器 (真正的 Hungarian/Munkres 算法)
- */
 class ByteTracker : public ImageProcessor {
 public:
   bool process(ProcessingContext &ctx) override;
@@ -71,7 +62,7 @@ private:
   iou_distance(const std::vector<STrack> &tracks,
                const std::vector<std::pair<Detection, int>> &dets);
 
-  // Munkres/Hungarian 最优匹配
+  // 关键点：这里做全局最优匹配，避免贪心分配导致 ID 抖动。
   std::vector<std::pair<int, int>>
   linear_assignment(const std::vector<std::vector<float>> &cost_matrix,
                     float thresh);

@@ -6,9 +6,6 @@
 
 namespace yolo_edge {
 
-// ============================================================================
-// ONNX Runtime 数据 (pimpl)
-// ============================================================================
 struct BatchInferenceEngine::OrtData {
   Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "BatchEngine"};
   std::unique_ptr<Ort::Session> session;
@@ -21,9 +18,6 @@ struct BatchInferenceEngine::OrtData {
   std::vector<std::string> output_names_storage;
 };
 
-// ============================================================================
-// 单例
-// ============================================================================
 BatchInferenceEngine &BatchInferenceEngine::instance() {
   static BatchInferenceEngine engine;
   return engine;
@@ -31,9 +25,6 @@ BatchInferenceEngine &BatchInferenceEngine::instance() {
 
 BatchInferenceEngine::~BatchInferenceEngine() { shutdown(); }
 
-// ============================================================================
-// 初始化
-// ============================================================================
 void BatchInferenceEngine::init(const std::string &model_path, int input_h,
                                 int input_w, bool use_cuda,
                                 int max_batch_size, int max_wait_ms) {
@@ -109,7 +100,6 @@ void BatchInferenceEngine::init(const std::string &model_path, int input_h,
             model_path.c_str(), cuda_ok ? "GPU" : "CPU", max_batch_size_,
             max_wait_ms_);
 
-    // 启动 worker 线程
     running_ = true;
     initialized_ = true;
     worker_ = std::thread(&BatchInferenceEngine::worker_loop, this);
@@ -120,9 +110,6 @@ void BatchInferenceEngine::init(const std::string &model_path, int input_h,
   }
 }
 
-// ============================================================================
-// 提交请求
-// ============================================================================
 std::future<BatchInferenceEngine::InferResult>
 BatchInferenceEngine::submit(InferRequest req) {
   std::promise<InferResult> promise;
@@ -137,9 +124,6 @@ BatchInferenceEngine::submit(InferRequest req) {
   return future;
 }
 
-// ============================================================================
-// 停止
-// ============================================================================
 void BatchInferenceEngine::shutdown() {
   if (!running_)
     return;
@@ -156,9 +140,6 @@ void BatchInferenceEngine::shutdown() {
   initialized_ = false;
 }
 
-// ============================================================================
-// Worker 线程: 收集 batch → 推理 → 分发结果
-// ============================================================================
 void BatchInferenceEngine::worker_loop() {
   while (running_) {
     std::vector<InferRequest> requests;
@@ -167,19 +148,16 @@ void BatchInferenceEngine::worker_loop() {
     {
       std::unique_lock<std::mutex> lock(queue_mutex_);
 
-      // 等待第一个请求到达
       queue_cv_.wait(lock, [this] { return !queue_.empty() || !running_; });
 
       if (!running_ && queue_.empty())
         break;
 
-      // 取出第一个
       auto &front = queue_.front();
       requests.push_back(std::move(front.request));
       promises.push_back(std::move(front.promise));
       queue_.pop();
 
-      // 尝试凑更多 (最多等 max_wait_ms_)
       if (max_batch_size_ > 1) {
         auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::milliseconds(max_wait_ms_);
@@ -197,13 +175,12 @@ void BatchInferenceEngine::worker_loop() {
               queue_.pop();
             }
           } else {
-            break; // 超时
+            break;
           }
         }
       }
     }
 
-    // 执行 batch 推理
     if (!requests.empty()) {
       run_batch(requests, promises);
     }
@@ -220,9 +197,6 @@ void BatchInferenceEngine::worker_loop() {
   }
 }
 
-// ============================================================================
-// 执行 Batch 推理
-// ============================================================================
 void BatchInferenceEngine::run_batch(
     std::vector<InferRequest> &requests,
     std::vector<std::promise<InferResult>> &promises) {
@@ -232,7 +206,7 @@ void BatchInferenceEngine::run_batch(
   size_t total = batch_size * per_image;
 
   try {
-    // 拼接 batch tensor
+    // 关键点：按 NCHW 连续内存拼成一块大 Tensor，可避免多次 ORT 调用。
     std::vector<float> batch_data(total);
     for (int b = 0; b < batch_size; ++b) {
       const float *src = requests[b].blob.ptr<float>();
@@ -251,60 +225,66 @@ void BatchInferenceEngine::run_batch(
         Ort::RunOptions{nullptr}, ort_->input_names.data(), &input_tensor, 1,
         ort_->output_names.data(), ort_->output_names.size());
 
-    // 解析输出并分发
-    if (!output_tensors.empty()) {
-      auto &out_tensor = output_tensors[0];
-      auto *data = out_tensor.GetTensorMutableData<float>();
-      auto out_shape = out_tensor.GetTensorTypeAndShapeInfo().GetShape();
-
-      // 输出 shape: [batch, features, boxes] 或 [batch, boxes, features]
-      if (out_shape.size() >= 2) {
-        size_t out_total = 1;
-        for (auto d : out_shape)
-          out_total *= d;
-
-        if (batch_size == 1) {
-          // 单帧: 直接返回所有数据
-          InferResult result;
-          result.data.assign(data, data + out_total);
-          result.shape = out_shape;
-          result.success = true;
-          promises[0].set_value(std::move(result));
-        } else {
-          // 多帧: 按 batch 维度拆分
-          size_t per_batch = out_total / batch_size;
-
-          // 调整 shape: 去掉 batch 维度
-          std::vector<int64_t> single_shape;
-          if (out_shape.size() == 3) {
-            single_shape = {1, out_shape[1], out_shape[2]};
-          } else {
-            single_shape = {out_shape[0] / batch_size, out_shape[1]};
-          }
-
-          for (int b = 0; b < batch_size; ++b) {
-            InferResult result;
-            result.data.assign(data + b * per_batch,
-                               data + (b + 1) * per_batch);
-            result.shape = single_shape;
-            result.success = true;
-            promises[b].set_value(std::move(result));
-          }
-        }
-      } else {
-        // 无法解析的输出
-        for (auto &p : promises) {
-          InferResult fail;
-          fail.success = false;
-          p.set_value(std::move(fail));
-        }
+    if (output_tensors.empty()) {
+      for (auto &p : promises) {
+        InferResult fail;
+        fail.success = false;
+        p.set_value(std::move(fail));
       }
+      return;
+    }
+
+    auto &out_tensor = output_tensors[0];
+    auto *data = out_tensor.GetTensorMutableData<float>();
+    auto out_shape = out_tensor.GetTensorTypeAndShapeInfo().GetShape();
+
+    if (out_shape.size() < 2) {
+      for (auto &p : promises) {
+        InferResult fail;
+        fail.success = false;
+        p.set_value(std::move(fail));
+      }
+      return;
+    }
+
+    size_t out_total = 1;
+    for (auto d : out_shape)
+      out_total *= d;
+
+    if (batch_size == 1) {
+      InferResult result;
+      result.data.assign(data, data + out_total);
+      result.shape = out_shape;
+      result.success = true;
+      promises[0].set_value(std::move(result));
+      return;
+    }
+
+    if (out_total % static_cast<size_t>(batch_size) != 0) {
+      for (auto &p : promises) {
+        InferResult fail;
+        fail.success = false;
+        p.set_value(std::move(fail));
+      }
+      return;
+    }
+
+    size_t per_batch = out_total / batch_size;
+    std::vector<int64_t> single_shape = out_shape;
+    single_shape[0] = 1;
+
+    for (int b = 0; b < batch_size; ++b) {
+      InferResult result;
+      result.data.assign(data + b * per_batch, data + (b + 1) * per_batch);
+      result.shape = single_shape;
+      result.success = true;
+      promises[b].set_value(std::move(result));
     }
 
   } catch (const std::exception &e) {
     fprintf(stderr, "[ERROR] BatchEngine: Inference failed (batch=%d): %s\n",
             batch_size, e.what());
-    // 失败: 回退到逐帧推理
+    // 难点：批量失败时逐帧兜底，避免把整批请求全部判死。
     for (int b = 0; b < batch_size; ++b) {
       try {
         size_t sz = per_image;

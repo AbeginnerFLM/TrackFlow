@@ -4,14 +4,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <limits>
-#include <numeric>
 
 namespace yolo_edge {
-
-// ============================================================================
-// STrack 实现
-// ============================================================================
 
 void STrack::init_kalman(const cv::RotatedRect &det) {
   kf = cv::KalmanFilter(8, 4, 0);
@@ -71,7 +65,6 @@ void STrack::update(const cv::RotatedRect &det, int frame, float conf) {
   hits++;
   time_since_update = 0;
 
-  // 使用环形缓冲区 (O(1) 替代 vector erase O(N))
   add_trajectory_point(det.center);
 
   if (kf_initialized) {
@@ -82,10 +75,6 @@ void STrack::update(const cv::RotatedRect &det, int frame, float conf) {
 }
 
 cv::RotatedRect STrack::get_predicted_bbox() const { return bbox; }
-
-// ============================================================================
-// ByteTracker 实现
-// ============================================================================
 
 void ByteTracker::configure(const json &config) {
   track_thresh_ = config.value("track_thresh", 0.5f);
@@ -123,7 +112,7 @@ bool ByteTracker::process(ProcessingContext &ctx) {
 void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
   frame_id_ = frame_id;
 
-  // Step 1: 分离高分/低分检测
+  // 关键点：先高分匹配再低分补配，这是 ByteTrack 稳定 ID 的核心策略。
   std::vector<std::pair<Detection, int>> dets_high, dets_low;
 
   for (size_t i = 0; i < detections.size(); ++i) {
@@ -133,13 +122,11 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
       dets_low.push_back({detections[i], static_cast<int>(i)});
   }
 
-  // Step 2: 预测
   for (auto &track : tracked_stracks_)
     track.predict();
   for (auto &track : lost_stracks_)
     track.predict();
 
-  // Step 3: 高分检测匹配
   std::vector<std::pair<int, int>> matches_high;
   std::vector<int> unmatched_tracks_high;
   std::vector<int> unmatched_dets_high;
@@ -169,7 +156,6 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
       unmatched_dets_high.push_back(i);
   }
 
-  // 更新匹配
   for (auto &[ti, di] : matches_high) {
     tracked_stracks_[ti].update(dets_high[di].first.obb, frame_id_,
                                 dets_high[di].first.confidence);
@@ -177,7 +163,7 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
     tracked_stracks_[ti].class_id = dets_high[di].first.class_id;
   }
 
-  // Step 4: 低分检测匹配
+  // 第二阶段：用低分框补回暂时退化的轨迹，减少短时漏检导致的丢轨。
   std::vector<STrack> remain_tracks;
   for (int idx : unmatched_tracks_high)
     remain_tracks.push_back(tracked_stracks_[idx]);
@@ -205,7 +191,6 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
     unmatched_tracks_low = unmatched_tracks_high;
   }
 
-  // Step 5: 未匹配 → Lost
   for (int idx : unmatched_tracks_low) {
     if (tracked_stracks_[idx].state != TrackState::Lost) {
       tracked_stracks_[idx].state = TrackState::Lost;
@@ -213,7 +198,6 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
     }
   }
 
-  // Step 6: 与 Lost 匹配
   std::vector<std::pair<Detection, int>> remain_dets_high;
   for (int idx : unmatched_dets_high)
     remain_dets_high.push_back(dets_high[idx]);
@@ -248,7 +232,6 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
     }
   }
 
-  // Step 7: 新轨迹
   for (int idx : unmatched_dets_high) {
     const auto &det = dets_high[idx].first;
     if (det.confidence >= high_thresh_) {
@@ -265,7 +248,6 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
     }
   }
 
-  // Step 8: 整理
   std::sort(reactivated_lost.rbegin(), reactivated_lost.rend());
   for (int idx : reactivated_lost) {
     tracked_stracks_.push_back(lost_stracks_[idx]);
@@ -287,7 +269,6 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
                      }),
       tracked_stracks_.end());
 
-  // Step 9: 更新 track_id
   for (auto &det : detections)
     det.track_id = -1;
 
@@ -318,9 +299,6 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
   }
 }
 
-// ============================================================================
-// IOU 距离
-// ============================================================================
 namespace {
 
 float rotated_iou(const cv::RotatedRect &a, const cv::RotatedRect &b) {
@@ -348,12 +326,22 @@ float rotated_iou(const cv::RotatedRect &a, const cv::RotatedRect &b) {
 std::vector<std::vector<float>>
 ByteTracker::iou_distance(const std::vector<STrack> &tracks,
                           const std::vector<std::pair<Detection, int>> &dets) {
-
   std::vector<std::vector<float>> cost(tracks.size(),
                                        std::vector<float>(dets.size(), 1.0f));
+  std::vector<cv::Rect> track_aabbs(tracks.size());
+  std::vector<cv::Rect> det_aabbs(dets.size());
+  for (size_t i = 0; i < tracks.size(); ++i) {
+    track_aabbs[i] = tracks[i].bbox.boundingRect();
+  }
+  for (size_t j = 0; j < dets.size(); ++j) {
+    det_aabbs[j] = dets[j].first.obb.boundingRect();
+  }
 
   for (size_t i = 0; i < tracks.size(); ++i) {
     for (size_t j = 0; j < dets.size(); ++j) {
+      if ((track_aabbs[i] & det_aabbs[j]).area() == 0) {
+        continue;
+      }
       float iou = rotated_iou(tracks[i].bbox, dets[j].first.obb);
       cost[i][j] = 1.0f - iou;
     }
@@ -362,9 +350,6 @@ ByteTracker::iou_distance(const std::vector<STrack> &tracks,
   return cost;
 }
 
-// ============================================================================
-// Hungarian/Munkres 算法 (Kuhn-Munkres, O(N^3))
-// ============================================================================
 std::vector<std::pair<int, int>> ByteTracker::linear_assignment(
     const std::vector<std::vector<float>> &cost_matrix, float thresh) {
 
@@ -375,13 +360,11 @@ std::vector<std::pair<int, int>> ByteTracker::linear_assignment(
   int m = cost_matrix[0].size(); // cols (dets)
   int sz = std::max(n, m);
 
-  // Pad to square matrix with threshold values
   std::vector<std::vector<float>> C(sz, std::vector<float>(sz, thresh));
   for (int i = 0; i < n; ++i)
     for (int j = 0; j < m; ++j)
       C[i][j] = cost_matrix[i][j];
 
-  // Hungarian algorithm (Kuhn-Munkres)
   const float INF = 1e9f;
   std::vector<float> u(sz + 1, 0), v(sz + 1, 0);
   std::vector<int> p(sz + 1, 0), way(sz + 1, 0);
@@ -430,7 +413,6 @@ std::vector<std::pair<int, int>> ByteTracker::linear_assignment(
     } while (j0);
   }
 
-  // Extract matches
   std::vector<std::pair<int, int>> matches;
   for (int j = 1; j <= sz; ++j) {
     int i = p[j] - 1;

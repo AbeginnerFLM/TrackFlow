@@ -1,13 +1,12 @@
 #include "network/ws_server.hpp"
 #include <App.h>
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 
 namespace yolo_edge {
 
-// ============================================================================
-// 实现细节 (pimpl)
-// ============================================================================
 struct WebSocketServer::Impl {
   uWS::Loop *loop = nullptr;
   us_listen_socket_t *listen_socket = nullptr;
@@ -19,9 +18,42 @@ struct PerSocketData {
   json pending_header;
 };
 
-// ============================================================================
-// 构造/析构
-// ============================================================================
+namespace {
+
+bool execute_default_pipeline(Session &session, ProcessingContext &ctx) {
+  using Clock = std::chrono::high_resolution_clock;
+  const auto start = Clock::now();
+
+  const size_t split = std::min<size_t>(2, session.pipeline.size());
+  bool success = session.pipeline.execute_range(ctx, 0, split);
+  if (session.pipeline.size() <= split) {
+    const auto end = Clock::now();
+    ctx.total_time_ms =
+        std::chrono::duration<double, std::milli>(end - start).count();
+    return success;
+  }
+
+  // 难点：即使前半段失败，也要消耗当前 frame_id 的 tracker 时序位，
+  // 否则后续帧会卡在 wait_for_turn，导致整个 session 堵塞。
+  session.wait_for_turn(ctx.frame_id);
+  try {
+    if (success) {
+      success = session.pipeline.execute_range(ctx, split, session.pipeline.size());
+    }
+  } catch (...) {
+    session.advance_turn();
+    throw;
+  }
+  session.advance_turn();
+
+  const auto end = Clock::now();
+  ctx.total_time_ms =
+      std::chrono::duration<double, std::milli>(end - start).count();
+  return success;
+}
+
+} // namespace
+
 WebSocketServer::WebSocketServer(int port, ThreadPool &pool)
     : port_(port), pool_(pool), impl_(std::make_unique<Impl>()) {}
 
@@ -31,9 +63,6 @@ void WebSocketServer::set_session_timeout(std::chrono::seconds timeout) {
   session_timeout_ = timeout;
 }
 
-// ============================================================================
-// 启动服务
-// ============================================================================
 void WebSocketServer::run() {
   running_ = true;
   impl_->loop = uWS::Loop::get();
@@ -95,29 +124,31 @@ void WebSocketServer::stop() {
   }
 }
 
-// ============================================================================
-// 消息处理
-// ============================================================================
 void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
                                      bool is_binary) {
   auto *ws = static_cast<uWS::WebSocket<false, true, PerSocketData> *>(ws_ptr);
   auto *socket_data = ws->getUserData();
   auto *loop = impl_->loop;
 
-  // 1. 二进制消息 (图片数据)
+  static std::atomic<uint64_t> cleanup_tick{0};
+  if ((cleanup_tick.fetch_add(1, std::memory_order_relaxed) & 0xFF) == 0) {
+    sessions_.cleanup_expired(session_timeout_);
+  }
+
   if (is_binary) {
-    if (!socket_data->waiting_for_image) return;
+    if (!socket_data->waiting_for_image)
+      return;
 
     socket_data->waiting_for_image = false;
     json request = socket_data->pending_header;
 
-    if (message.size() > 100 * 1024 * 1024) return;
+    if (message.size() > 100 * 1024 * 1024)
+      return;
 
     auto image_data = std::make_shared<std::vector<uint8_t>>(
         message.begin(), message.end());
 
-    pool_.enqueue([this, ws, socket_data, loop, request,
-                   image_data]() {
+    pool_.enqueue([this, ws, socket_data, loop, request, image_data]() {
       json response;
       try {
         ProcessingContext ctx;
@@ -132,30 +163,8 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
                            {"config", request.value("config", json::object())}};
 
         auto &session = sessions_.get_or_create(ctx.session_id, pipeline_config);
-
-        using Clock = std::chrono::high_resolution_clock;
-        auto start = Clock::now();
-
-        // Phase 1: decode + yolo (并行, 允许 BatchEngine 凑 batch)
-        bool success = session.pipeline.execute_range(ctx, 0, 2);
-
-        // Phase 2: tracker (按帧序串行, RAII 保证 advance)
-        session.wait_for_turn(ctx.frame_id);
-        try {
-          if (success) {
-            success = session.pipeline.execute_range(ctx, 2, session.pipeline.size());
-          }
-        } catch (...) {
-          session.advance_turn();
-          throw;
-        }
-        session.advance_turn();
-
-        auto end = Clock::now();
-        ctx.total_time_ms =
-            std::chrono::duration<double, std::milli>(end - start).count();
-
-        response = build_response(ctx, request, success);
+        bool success = execute_default_pipeline(session, ctx);
+        response = build_response(ctx, success);
 
       } catch (const std::exception &e) {
         response = build_error(e.what());
@@ -167,7 +176,6 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
     return;
   }
 
-  // 2. 文本消息 (JSON)
   try {
     json request = json::parse(message);
     std::string request_type = request.value("type", "infer");
@@ -178,49 +186,59 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
       return;
     }
 
-    std::string msg_copy(message);
+    if (request_type == "ping") {
+      json pong = {{"type", "pong"}, {"request_id", request.value("request_id", "")}};
+      ws->send(pong.dump(), uWS::OpCode::TEXT);
+      return;
+    }
 
-    pool_.enqueue([this, ws, socket_data, loop, msg_copy]() {
+    if (request_type == "reset") {
+      std::string rid = request.value("request_id", "");
+      std::string sid = request.value("session_id", socket_data->session_id);
+      sessions_.remove(sid);
+      json response = {{"type", "reset_ack"}, {"request_id", rid}, {"session_id", sid}};
+      ws->send(response.dump(), uWS::OpCode::TEXT);
+      return;
+    }
+
+    if (request_type != "infer") {
+      ws->send(build_error("Unknown type: " + request_type,
+                           request.value("request_id", ""))
+                   .dump(),
+               uWS::OpCode::TEXT);
+      return;
+    }
+
+    pool_.enqueue([this, ws, socket_data, loop, request = std::move(request)]() {
       json response;
       try {
-        json req = json::parse(msg_copy);
-        std::string type = req.value("type", "infer");
-        std::string rid = req.value("request_id", "");
+        ProcessingContext ctx;
+        ctx.request_id = request.value("request_id", "");
+        ctx.session_id = request.value("session_id", socket_data->session_id);
+        ctx.frame_id = request.value("frame_id", 0);
 
-        if (type == "ping") {
-          response = {{"type", "pong"}, {"request_id", rid}};
-        } else if (type == "reset") {
-          std::string sid = req.value("session_id", socket_data->session_id);
-          sessions_.remove(sid);
-          response = {
-              {"type", "reset_ack"}, {"request_id", rid}, {"session_id", sid}};
-        } else if (type == "infer") {
-          ProcessingContext ctx;
-          ctx.request_id = rid;
-          ctx.session_id = req.value("session_id", socket_data->session_id);
-          ctx.frame_id = req.value("frame_id", 0);
-
-          if (req.contains("image"))
-            ctx.set("image_base64", req["image"].get<std::string>());
-
-          json pipeline_config;
-          if (req.contains("pipeline"))
-            pipeline_config = req;
-          else
-            pipeline_config = {{"pipeline", {"decoder", "yolo", "tracker"}},
-                               {"config", req.value("config", json::object())}};
-
-          auto &session =
-              sessions_.get_or_create(ctx.session_id, pipeline_config);
-          bool success;
-          {
-            std::lock_guard<std::mutex> lock(session.pipeline_mutex);
-            success = session.pipeline.execute(ctx);
-          }
-          response = build_response(ctx, req, success);
-        } else {
-          response = build_error("Unknown type: " + type, rid);
+        if (request.contains("image")) {
+          ctx.set("image_base64", request["image"].get<std::string>());
         }
+
+        json pipeline_config;
+        bool is_default_pipeline = !request.contains("pipeline");
+        if (is_default_pipeline) {
+          pipeline_config = {{"pipeline", {"decoder", "yolo", "tracker"}},
+                             {"config", request.value("config", json::object())}};
+        } else {
+          pipeline_config = request;
+        }
+
+        auto &session = sessions_.get_or_create(ctx.session_id, pipeline_config);
+        bool success = false;
+        if (is_default_pipeline) {
+          success = execute_default_pipeline(session, ctx);
+        } else {
+          std::lock_guard<std::mutex> lock(session.pipeline_mutex);
+          success = session.pipeline.execute(ctx);
+        }
+        response = build_response(ctx, success);
       } catch (const std::exception &e) {
         response = build_error(e.what());
       }
@@ -235,11 +253,7 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
   }
 }
 
-// ============================================================================
-// 构建响应 (优化: 减少冗余计算)
-// ============================================================================
-json WebSocketServer::build_response(const ProcessingContext &ctx,
-                                     const json &request, bool success) {
+json WebSocketServer::build_response(const ProcessingContext &ctx, bool success) {
   json response = {{"type", success ? "result" : "error"},
                    {"request_id", ctx.request_id},
                    {"session_id", ctx.session_id},
@@ -256,24 +270,20 @@ json WebSocketServer::build_response(const ProcessingContext &ctx,
   for (const auto &det : ctx.detections) {
     json det_json;
 
-    // 基本信息
     det_json["track_id"] = det.track_id;
     det_json["class_id"] = det.class_id;
     det_json["class_name"] = det.class_name;
     det_json["confidence"] = det.confidence;
     det_json["angle"] = det.obb.angle;
 
-    // OBB 顶点
     cv::Point2f pts[4];
     det.obb.points(pts);
     det_json["obb"] = {pts[0].x, pts[0].y, pts[1].x, pts[1].y,
                        pts[2].x, pts[2].y, pts[3].x, pts[3].y};
 
-    // HBB
     cv::Rect rect = det.obb.boundingRect();
     det_json["bbox"] = {rect.x, rect.y, rect.width, rect.height};
 
-    // 可选地理坐标
     if (det.ground_x.has_value())
       det_json["ground_x"] = det.ground_x.value();
     if (det.ground_y.has_value())
