@@ -12,13 +12,37 @@ struct WebSocketServer::Impl {
   us_listen_socket_t *listen_socket = nullptr;
 };
 
+struct ConnectionState {
+  void *ws = nullptr;
+  bool closed = false;
+};
+
 struct PerSocketData {
   std::string session_id;
   bool waiting_for_image = false;
   json pending_header;
+  std::shared_ptr<ConnectionState> connection;
 };
 
+using WsHandle = uWS::WebSocket<false, true, PerSocketData>;
+
 namespace {
+
+void defer_send_text(uWS::Loop *loop, const std::shared_ptr<ConnectionState> &connection,
+                     json response) {
+  if (!loop || !connection) {
+    return;
+  }
+
+  loop->defer([connection, response = std::move(response)]() mutable {
+    if (connection->closed || connection->ws == nullptr) {
+      return;
+    }
+
+    auto *ws = static_cast<WsHandle *>(connection->ws);
+    ws->send(response.dump(), uWS::OpCode::TEXT);
+  });
+}
 
 bool execute_default_pipeline(Session &session, ProcessingContext &ctx) {
   using Clock = std::chrono::high_resolution_clock;
@@ -78,6 +102,9 @@ void WebSocketServer::run() {
            .open =
                [](auto *ws) {
                  auto *data = ws->getUserData();
+                 data->connection = std::make_shared<ConnectionState>();
+                 data->connection->ws = ws;
+                 data->connection->closed = false;
                  data->session_id =
                      "session_" +
                      std::to_string(std::chrono::steady_clock::now()
@@ -95,6 +122,10 @@ void WebSocketServer::run() {
            .close =
                [this](auto *ws, int code, std::string_view message) {
                  auto *data = ws->getUserData();
+                 if (data->connection) {
+                   data->connection->closed = true;
+                   data->connection->ws = nullptr;
+                 }
                  fprintf(stderr, "[INFO] Client disconnected: %s\n",
                          data->session_id.c_str());
                  sessions_.remove(data->session_id);
@@ -126,7 +157,7 @@ void WebSocketServer::stop() {
 
 void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
                                      bool is_binary) {
-  auto *ws = static_cast<uWS::WebSocket<false, true, PerSocketData> *>(ws_ptr);
+  auto *ws = static_cast<WsHandle *>(ws_ptr);
   auto *socket_data = ws->getUserData();
   auto *loop = impl_->loop;
 
@@ -148,78 +179,18 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
     auto image_data = std::make_shared<std::vector<uint8_t>>(
         message.begin(), message.end());
 
-    pool_.enqueue([this, ws, socket_data, loop, request, image_data]() {
+    auto connection = socket_data->connection;
+    auto default_session_id = socket_data->session_id;
+    pool_.enqueue([this, loop, request, image_data, connection,
+                   default_session_id]() {
       json response;
       try {
         ProcessingContext ctx;
         std::string request_id = request.value("request_id", "");
         ctx.request_id = request_id;
-        ctx.session_id = request.value("session_id", socket_data->session_id);
+        ctx.session_id = request.value("session_id", default_session_id);
         ctx.frame_id = request.value("frame_id", 0);
         ctx.set("image_binary", image_data);
-
-        json pipeline_config;
-        pipeline_config = {{"pipeline", {"decoder", "yolo", "tracker"}},
-                           {"config", request.value("config", json::object())}};
-
-        auto &session = sessions_.get_or_create(ctx.session_id, pipeline_config);
-        bool success = execute_default_pipeline(session, ctx);
-        response = build_response(ctx, success);
-
-      } catch (const std::exception &e) {
-        response = build_error(e.what());
-      }
-
-      loop->defer(
-          [ws, response]() { ws->send(response.dump(), uWS::OpCode::TEXT); });
-    });
-    return;
-  }
-
-  try {
-    json request = json::parse(message);
-    std::string request_type = request.value("type", "infer");
-
-    if (request_type == "infer_header") {
-      socket_data->pending_header = request;
-      socket_data->waiting_for_image = true;
-      return;
-    }
-
-    if (request_type == "ping") {
-      json pong = {{"type", "pong"}, {"request_id", request.value("request_id", "")}};
-      ws->send(pong.dump(), uWS::OpCode::TEXT);
-      return;
-    }
-
-    if (request_type == "reset") {
-      std::string rid = request.value("request_id", "");
-      std::string sid = request.value("session_id", socket_data->session_id);
-      sessions_.remove(sid);
-      json response = {{"type", "reset_ack"}, {"request_id", rid}, {"session_id", sid}};
-      ws->send(response.dump(), uWS::OpCode::TEXT);
-      return;
-    }
-
-    if (request_type != "infer") {
-      ws->send(build_error("Unknown type: " + request_type,
-                           request.value("request_id", ""))
-                   .dump(),
-               uWS::OpCode::TEXT);
-      return;
-    }
-
-    pool_.enqueue([this, ws, socket_data, loop, request = std::move(request)]() {
-      json response;
-      try {
-        ProcessingContext ctx;
-        ctx.request_id = request.value("request_id", "");
-        ctx.session_id = request.value("session_id", socket_data->session_id);
-        ctx.frame_id = request.value("frame_id", 0);
-
-        if (request.contains("image")) {
-          ctx.set("image_base64", request["image"].get<std::string>());
-        }
 
         json pipeline_config;
         bool is_default_pipeline = !request.contains("pipeline");
@@ -239,13 +210,67 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
           success = session.pipeline.execute(ctx);
         }
         response = build_response(ctx, success);
+
       } catch (const std::exception &e) {
         response = build_error(e.what());
       }
 
-      loop->defer(
-          [ws, response]() { ws->send(response.dump(), uWS::OpCode::TEXT); });
+      defer_send_text(loop, connection, std::move(response));
     });
+    return;
+  }
+
+  try {
+    json request = json::parse(message);
+    std::string request_type = request.value("type", "");
+
+    if (request_type == "infer_header") {
+      socket_data->session_id =
+          request.value("session_id", socket_data->session_id);
+      socket_data->pending_header = request;
+      socket_data->waiting_for_image = true;
+      return;
+    }
+
+    if (request_type == "ping") {
+      json pong = {{"type", "pong"}, {"request_id", request.value("request_id", "")}};
+      ws->send(pong.dump(), uWS::OpCode::TEXT);
+      return;
+    }
+
+    if (request_type == "reset") {
+      std::string rid = request.value("request_id", "");
+      std::string sid = request.value("session_id", socket_data->session_id);
+      socket_data->session_id = sid;
+      sessions_.remove(sid);
+      json response = {{"type", "reset_ack"}, {"request_id", rid}, {"session_id", sid}};
+      ws->send(response.dump(), uWS::OpCode::TEXT);
+      return;
+    }
+
+    if (request_type == "infer") {
+      ws->send(build_error(
+                   "Legacy JSON infer is no longer supported. "
+                   "Use infer_header followed by a binary image frame.",
+                   request.value("request_id", ""))
+                   .dump(),
+               uWS::OpCode::TEXT);
+      return;
+    }
+
+    if (request_type.empty()) {
+      ws->send(build_error("Missing type in request",
+                           request.value("request_id", ""))
+                   .dump(),
+               uWS::OpCode::TEXT);
+      return;
+    }
+
+    ws->send(build_error("Unknown type: " + request_type,
+                         request.value("request_id", ""))
+                 .dump(),
+             uWS::OpCode::TEXT);
+    return;
 
   } catch (const std::exception &e) {
     json err = build_error("Invalid JSON: " + std::string(e.what()));
