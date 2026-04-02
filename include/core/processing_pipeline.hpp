@@ -39,6 +39,14 @@ public:
     return true;
   }
 
+  int find_index(const std::string &proc_name) const {
+    for (size_t i = 0; i < processors_.size(); ++i) {
+      if (processors_[i]->name() == proc_name)
+        return static_cast<int>(i);
+    }
+    return -1;
+  }
+
   void clear() { processors_.clear(); }
   size_t size() const { return processors_.size(); }
   bool empty() const { return processors_.empty(); }

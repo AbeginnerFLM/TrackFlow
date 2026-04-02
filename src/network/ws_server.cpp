@@ -48,7 +48,10 @@ bool execute_default_pipeline(Session &session, ProcessingContext &ctx) {
   using Clock = std::chrono::high_resolution_clock;
   const auto start = Clock::now();
 
-  const size_t split = std::min<size_t>(2, session.pipeline.size());
+  int tracker_idx = session.pipeline.find_index("ByteTracker");
+  const size_t split = (tracker_idx >= 0)
+      ? static_cast<size_t>(tracker_idx)
+      : session.pipeline.size();
   bool success = session.pipeline.execute_range(ctx, 0, split);
   if (session.pipeline.size() <= split) {
     const auto end = Clock::now();
@@ -193,8 +196,7 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
         ctx.set("image_binary", image_data);
 
         json pipeline_config;
-        bool is_default_pipeline = !request.contains("pipeline");
-        if (is_default_pipeline) {
+        if (!request.contains("pipeline")) {
           pipeline_config = {{"pipeline", {"decoder", "yolo", "tracker"}},
                              {"config", request.value("config", json::object())}};
         } else {
@@ -202,13 +204,7 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
         }
 
         auto &session = sessions_.get_or_create(ctx.session_id, pipeline_config);
-        bool success = false;
-        if (is_default_pipeline) {
-          success = execute_default_pipeline(session, ctx);
-        } else {
-          std::lock_guard<std::mutex> lock(session.pipeline_mutex);
-          success = session.pipeline.execute(ctx);
-        }
+        bool success = execute_default_pipeline(session, ctx);
         response = build_response(ctx, success);
 
       } catch (const std::exception &e) {

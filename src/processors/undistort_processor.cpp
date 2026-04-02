@@ -58,6 +58,8 @@ bool UndistortProcessor::process(ProcessingContext &ctx) {
     ctx.detections[i].obb.center = pts_out[i];
   }
 
+  ctx.set("undistorted", true);
+
   return true;
 }
 

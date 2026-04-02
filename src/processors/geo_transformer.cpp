@@ -123,7 +123,7 @@ bool GeoTransformer::process(ProcessingContext &ctx) {
   }
 
   // 难点：畸变校正和单应变换都支持向量化，批量处理能明显减少小对象分配。
-  if (has_camera_params_) {
+  if (has_camera_params_ && !ctx.get_or<bool>("undistorted", false)) {
     std::vector<cv::Point2f> undistorted;
     cv::undistortPoints(centers, undistorted, K_, dist_, cv::noArray(), K_);
     centers = std::move(undistorted);

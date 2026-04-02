@@ -172,3 +172,46 @@
 - **修复 reset 竞态**: 前端发送 reset 后，等待服务器返回 `reset_ack` 才开始发送新帧，避免 reset 和推理帧交错。
 - **异常安全**: tracker 阶段用 try/catch 包裹，确保即使 tracker 抛出异常也会调用 `advance_turn()`，防止后续帧死锁。
 **关键教训**: 从串行 pipeline 改为并行架构时，必须同时解决三个问题：(1) 模型的 batch 兼容性、(2) 有状态处理器（tracker）的帧排序、(3) 全局状态操作（reset）的同步。这三者任一缺失都会导致 tracker 失效。
+
+## 17. 自定义 Pipeline 帧序丢失
+**问题**: 当前端发送自定义 pipeline（如 `["decoder","yolo","undistort","tracker","geo_transform"]`）时，ByteTracker 可能乱序处理帧，导致 track ID 不稳定。
+**原因**:
+- 默认 pipeline 走 `execute_default_pipeline()`，有 `wait_for_turn(frame_id)` 帧序保证。
+- 自定义 pipeline 走 `session.pipeline.execute(ctx)` + `std::lock_guard`，仅保证互斥但**不保证顺序**。
+- 前端 `MAX_INFLIGHT=4`，4 帧并发时 tracker 接收顺序不确定。
+**解决**:
+- `ProcessingPipeline` 新增 `find_index(name)` 方法，按 processor 的 `name()` 查找位置。
+- `execute_default_pipeline()` 中将硬编码的 `split=2` 改为动态查找 `"ByteTracker"` 位置作为分割点。
+- 移除 `is_default_pipeline` 分支，所有 pipeline 统一走 `execute_default_pipeline()`，确保 tracker 前的阶段可并行、tracker 及之后的阶段严格按帧序执行。
+
+## 18. 双重畸变校正
+**问题**: Pipeline 含 `undistort` + `geo_transform` 且都配置了 `camera_matrix` 时，检测中心点被 `cv::undistortPoints` 校正两次。
+**原因**:
+- `UndistortProcessor::process()` 对中心点做畸变校正。
+- `GeoTransformer::process()` 内部也有 `if (has_camera_params_)` 再次校正中心点。
+- 两个 processor 各自独立，无法感知对方是否已执行。
+**解决**:
+- `UndistortProcessor` 执行后设置 `ctx.set("undistorted", true)` 标记。
+- `GeoTransformer` 检查 `ctx.get_or<bool>("undistorted", false)`，为 true 时跳过中心点的重复校正。
+- 利用已有的 `ProcessingContext::extras_` 机制，零新增基础设施。
+
+## 19. 推理中途 WebSocket 自动断连 (约 700 帧)
+**问题**: 推理运行约 698 帧后，前端显示 `Disconnected`，推理停止。
+**原因** (多因素叠加):
+1. **inflight 死锁**: 前端 `MAX_INFLIGHT=4`，若某个响应因网络延迟/丢失未返回，对应 slot 永远不释放。4 个 slot 被耗尽后前端停止发帧。
+2. **无 ping 心跳**: 前端没有周期性 ping 保活。链路经过 Cloudflare Tunnel（空闲超时 ~100s），前端停发帧后 Cloudflare 判定连接空闲并断开。
+3. **服务端 idleTimeout=120**: 若 Cloudflare 未先断，服务端 120s 无数据也会主动关闭。
+4. **静默丢帧**: `ws_server.cpp:170` 在 `waiting_for_image=false` 时丢弃 binary 数据且不报错，前端 inflight slot 无法释放。
+**解决** (待实施):
+- 前端增加 inflight 超时（15s 无响应自动清除 slot）。
+- 前端增加 ping 心跳（每 30s），防止 Cloudflare/服务端判定空闲。
+- 前端增加自动重连机制。
+
+## 20. 前端轨迹渲染 bug
+**问题**: 车辆轨迹显示异常——长度不受用户设置控制，且轨迹断线后无法恢复。
+**原因**:
+1. **硬编码缓冲区**: `test_v5.html:647` 使用硬编码 `500` 点作为缓冲上限，忽略用户设置的 `trajLength` 变量。
+2. **间隙绘制 bug**: `test_v5.html:712` 检测到帧间隙 (`gap>3`) 时执行 `moveTo` + `continue`，跳过了 `lineTo`，导致断线后下一个有效点也不会被连接。
+**解决** (待实施):
+- 将硬编码 `500` 替换为 `trajLength`。
+- 间隙检测后移除 `continue`，改为 `moveTo` 后继续循环让后续点正常 `lineTo`。
