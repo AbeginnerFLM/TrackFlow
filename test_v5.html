@@ -316,7 +316,32 @@ const MAX_INFLIGHT=4;
 let inflightFrames=new Map();
 let nextFrameTime=0,seekBusy=false,fpsT0=0,fpsCnt=0;
 const colors=['#48f08b','#f28b82','#8ab4f8','#fdd663','#c58af9','#ff8bcb','#36d1a0','#78d9ec','#fcb75e','#a8c7fa'];
-const cfg={yolo:{model_path:'models/yolo26.onnx',confidence:0.5,nms_threshold:0.45,use_cuda:true},tracker:{enabled:true}};
+const baseCfg={yolo:{model_path:'models/yolo26.onnx',confidence:0.5,nms_threshold:0.45,use_cuda:true},tracker:{enabled:true}};
+let lastPipelineKey=''; // track pipeline changes to trigger session reset
+
+function buildPipelineConfig(){
+    const pipe=['decoder','yolo'];
+    const pcfg=Object.assign({},baseCfg);
+    if(undistortEnabled&&cameraMatrix&&distCoeffs){
+        pipe.push('undistort');
+        pcfg.undistort={camera_matrix:Array.from(cameraMatrix),dist_coeffs:Array.from(distCoeffs)};
+    }
+    pipe.push('tracker');
+    if(homographyMatrix&&(originLon||originLat)){
+        pipe.push('geo_transform');
+        const geo={homography:Array.from(homographyMatrix),origin_lon:originLon,origin_lat:originLat};
+        if(cameraMatrix&&distCoeffs){
+            geo.camera_matrix=Array.from(cameraMatrix);
+            geo.dist_coeffs=Array.from(distCoeffs);
+        }
+        pcfg.geo_transform=geo;
+    }
+    const key=pipe.join(',');
+    const changed=key!==lastPipelineKey;
+    lastPipelineKey=key;
+    const useCustom=pipe.length>3; // more than decoder+yolo+tracker
+    return {header:useCustom?{pipeline:pipe,config:pcfg}:{config:pcfg}, changed};
+}
 
 /* ── State ── */
 let homographyMatrix=null; // 3x3 flat array [h00,h01,h02,h10,h11,h12,h20,h21,h22]
@@ -457,16 +482,49 @@ function clearLog(){$('logB').innerHTML='<div class="log-empty" id="logE">Ready<
 /* ══════════════════════════════════════════
    §3  CONNECTION
    ══════════════════════════════════════════ */
+let pingTimer=null,inflightTimer=null;
+const PING_INTERVAL=30000;    // 30s heartbeat
+const INFLIGHT_TIMEOUT=15000; // 15s per-request timeout
+
 function toggleConn(){ws&&ws.readyState===1?ws.close():connect()}
 function connect(){
     const proto=location.protocol==='https:'?'wss':'ws';
     const url=proto+'://'+location.host+'/ws';
     log('Connecting to '+url+'...');
     ws=new WebSocket(url);
-    ws.onopen=()=>{log('Connected','success');setConn(true)};
+    ws.onopen=()=>{
+        log('Connected','success');setConn(true);
+        startPing();
+    };
     ws.onmessage=e=>onMsg(e.data);
     ws.onerror=()=>{log('Connection error','error');setConn(false)};
-    ws.onclose=()=>{log('Disconnected');setConn(false);if(streaming)stopInfer()};
+    ws.onclose=()=>{
+        stopPing();
+        log('Disconnected');setConn(false);
+        if(streaming)stopInfer();
+    };
+}
+function startPing(){
+    stopPing();
+    pingTimer=setInterval(()=>{
+        if(ws&&ws.readyState===1){
+            ws.send(JSON.stringify({type:'ping',request_id:'keepalive'}));
+        }
+    },PING_INTERVAL);
+    inflightTimer=setInterval(()=>{
+        const now=performance.now();
+        for(const [rid,entry] of inflightFrames){
+            if(now-entry.t0>INFLIGHT_TIMEOUT){
+                log('Request '+rid+' timed out, releasing slot','error');
+                inflightFrames.delete(rid);
+                pumpFrames();
+            }
+        }
+    },3000);
+}
+function stopPing(){
+    if(pingTimer){clearInterval(pingTimer);pingTimer=null;}
+    if(inflightTimer){clearInterval(inflightTimer);inflightTimer=null;}
 }
 function setConn(on){
     $('cd').classList.toggle('on',on);
@@ -556,7 +614,8 @@ function pumpFrames(){
                 frameId++;
                 const rid='f_'+frameId;
                 inflightFrames.set(rid,{img:imgData,t0:performance.now()});
-                ws.send(JSON.stringify({type:'infer_header',request_id:rid,frame_id:frameId,config:cfg}));
+                const pc=buildPipelineConfig();
+                ws.send(JSON.stringify(Object.assign({type:'infer_header',request_id:rid,frame_id:frameId},pc.header)));
                 ws.send(buf);
                 nextFrameTime+=1/targetFps;
                 pumpFrames();
@@ -609,10 +668,17 @@ function onMsg(data){
             tr.frameIds.push(currentFrameId);
             tr.lastFrame=currentFrameId;
 
-            // Coordinate transforms
-            const gp=imageToGround(center[0],center[1]);
+            // Coordinate transforms (prefer server-side if available)
+            let gp=null;
+            if(d.ground_x!=null&&d.ground_y!=null){
+                gp=[d.ground_x,d.ground_y];
+            }else{
+                gp=imageToGround(center[0],center[1]);
+            }
             tr.groundPositions.push(gp);
-            if(gp){
+            if(d.lon!=null&&d.lat!=null){
+                tr.lonlatPositions.push([d.lat,d.lon]);
+            }else if(gp){
                 const ll=groundToLatLon(gp[0],gp[1]);
                 tr.lonlatPositions.push(ll);
             }else{
@@ -644,8 +710,8 @@ function onMsg(data){
             }
 
             // Ring buffer: limit trajectory length
-            if(tr.positions.length>500){
-                const cut=tr.positions.length-500;
+            if(tr.positions.length>trajLength){
+                const cut=tr.positions.length-trajLength;
                 tr.positions.splice(0,cut);
                 tr.groundPositions.splice(0,cut);
                 tr.lonlatPositions.splice(0,cut);
@@ -709,7 +775,7 @@ function draw(dets,currentFrameId){
             for(let i=start;i<pts.length;i++){
                 if(i>start){
                     const gap=fids[i]-fids[i-1];
-                    if(gap>3||gap<=0){cx.moveTo(pts[i][0],pts[i][1]);continue}
+                    if(gap>3||gap<=0){cx.moveTo(pts[i][0],pts[i][1]);moved=true;continue}
                 }
                 if(!moved){cx.moveTo(pts[i][0],pts[i][1]);moved=true}
                 else cx.lineTo(pts[i][0],pts[i][1]);
