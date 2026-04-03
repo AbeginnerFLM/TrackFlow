@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TrackFlow Calibration</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#1a1a2e;--panel:#16213e;--card:#0f3460;--accent:#00d4aa;--warn:#f28b82;--text:#e0e0e0;--dim:#888;--radius:6px}
+body{font:13px/1.5 'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);display:flex;flex-direction:column;height:100vh;overflow:hidden}
+header{background:var(--panel);padding:8px 16px;display:flex;align-items:center;gap:16px;border-bottom:1px solid #333}
+header h1{font-size:16px;font-weight:600}
+header a{color:var(--accent);text-decoration:none;font-size:12px}
+.main{display:flex;flex:1;overflow:hidden}
+.left{width:340px;min-width:280px;background:var(--panel);overflow-y:auto;padding:12px;border-right:1px solid #333}
+.right{flex:1;display:flex;flex-direction:column;position:relative;background:#111}
+canvas{display:block;width:100%;height:100%;object-fit:contain;cursor:crosshair}
+video{display:none}
+.section{margin-bottom:12px;padding:10px;background:var(--card);border-radius:var(--radius)}
+.section-title{font-size:12px;font-weight:700;text-transform:uppercase;color:var(--accent);margin-bottom:8px;letter-spacing:.5px}
+.field{margin-bottom:6px}
+.field label{display:block;font-size:11px;color:var(--dim);margin-bottom:2px}
+.field input,.field textarea,.field select{width:100%;padding:5px 8px;background:#1a1a2e;border:1px solid #444;border-radius:4px;color:var(--text);font-size:12px;font-family:inherit}
+.field textarea{font-family:'Consolas','Courier New',monospace;resize:vertical}
+.field-row{display:flex;gap:8px}
+.field-row .field{flex:1}
+.btn{padding:5px 12px;border:none;border-radius:4px;font-size:12px;cursor:pointer;background:#333;color:var(--text);transition:background .15s}
+.btn:hover{background:#444}
+.btn-g{background:#0a6e55;color:#fff}
+.btn-g:hover{background:#0d9070}
+.btn-r{background:#8b2020;color:#fff}
+.btn-r:hover{background:#a52a2a}
+.btn-sm{padding:3px 8px;font-size:11px}
+.btn-row{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}
+.gcp-list,.val-list{max-height:200px;overflow-y:auto;font-size:11px;font-family:monospace}
+.gcp-item,.val-item{padding:4px 6px;border-bottom:1px solid #333;display:flex;justify-content:space-between;align-items:center}
+.gcp-item:hover,.val-item:hover{background:#1a1a3e}
+.gcp-item .del{cursor:pointer;color:var(--warn);font-size:10px}
+.status{font-size:11px;color:var(--dim);margin:4px 0}
+.status.ok{color:var(--accent)}
+.status.err{color:var(--warn)}
+.toolbar{position:absolute;bottom:0;left:0;right:0;background:rgba(22,33,62,.9);padding:8px 12px;display:flex;align-items:center;gap:12px}
+.toolbar .mode-btn{padding:4px 12px;border-radius:4px;font-size:12px;cursor:pointer;border:1px solid #555;background:transparent;color:var(--text)}
+.toolbar .mode-btn.active{background:var(--accent);color:#000;border-color:var(--accent)}
+input[type=range]{width:100%;accent-color:var(--accent)}
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:100}
+.modal{background:var(--panel);border:1px solid #444;border-radius:8px;padding:20px;min-width:360px;max-width:440px}
+.modal h3{margin-bottom:12px;font-size:14px}
+.modal .pred{font-size:12px;color:var(--accent);margin:8px 0;font-family:monospace}
+.h-matrix{font-family:monospace;font-size:11px;background:#1a1a2e;padding:8px;border-radius:4px;white-space:pre;overflow-x:auto;margin:6px 0}
+.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600}
+.tag-gcp{background:#0a6e55;color:#fff}
+.tag-val{background:#5e35b1;color:#fff}
+</style>
+</head>
+<body>
+
+<header>
+    <h1>TrackFlow Calibration Tool</h1>
+    <a href="test_v5.html">&larr; Back to Inference</a>
+    <span style="flex:1"></span>
+    <span id="frameInfo" style="font-size:12px;color:var(--dim)">No video loaded</span>
+</header>
+
+<div class="main">
+<div class="left">
+
+<!-- §1 Video -->
+<div class="section">
+    <div class="section-title">1. Video</div>
+    <div class="btn-row">
+        <button class="btn" onclick="$('vidFile').click()">Open Video</button>
+        <input type="file" id="vidFile" accept="video/*" style="display:none" onchange="loadVideo(this.files[0])">
+    </div>
+    <input type="range" id="slider" min="0" max="0" value="0" oninput="seekFrame(+this.value)">
+    <div class="field-row" style="margin-top:4px">
+        <div class="field"><label>Frame</label><input type="number" id="frameNum" value="0" min="0" onchange="seekFrame(+this.value)"></div>
+        <div class="field"><label>Total</label><input type="text" id="totalFrames" value="0" readonly></div>
+    </div>
+    <div class="btn-row">
+        <button class="btn btn-sm" onclick="seekFrame(Math.max(0,currentFrame-1))">&laquo; Prev</button>
+        <button class="btn btn-sm" onclick="seekFrame(Math.min(totalFrames-1,currentFrame+1))">Next &raquo;</button>
+    </div>
+</div>
+
+<!-- §2 Camera Params -->
+<div class="section">
+    <div class="section-title">2. Camera Parameters (optional)</div>
+    <div class="btn-row">
+        <button class="btn" onclick="$('camFile').click()">Load JSON</button>
+        <input type="file" id="camFile" accept=".json,.yaml,.yml" style="display:none" onchange="loadCamParams(this.files[0])">
+    </div>
+    <div class="status" id="camStatus">Not loaded</div>
+</div>
+
+<!-- §3 GCP -->
+<div class="section">
+    <div class="section-title">3. GCP Points</div>
+    <div class="btn-row">
+        <button class="btn btn-sm" onclick="$('gcpFile').click()">Import CSV</button>
+        <input type="file" id="gcpFile" accept=".csv" style="display:none" onchange="importGcpCsv(this.files[0])">
+        <button class="btn btn-sm" onclick="exportGcpCsv()">Export CSV</button>
+        <button class="btn btn-sm btn-r" onclick="clearGcp()">Clear</button>
+    </div>
+    <div class="gcp-list" id="gcpList"></div>
+    <div class="status" id="gcpStatus">0 points — need at least 4</div>
+</div>
+
+<!-- §4 Compute H -->
+<div class="section">
+    <div class="section-title">4. Compute Homography</div>
+    <div class="field-row">
+        <div class="field"><label>RANSAC Threshold (px)</label><input type="number" id="ransacThresh" value="3" step="0.5" min="0.5"></div>
+        <div class="field"><label>Undistort GCP</label><select id="undistGcp"><option value="0">No</option><option value="1">Yes</option></select></div>
+    </div>
+    <div class="btn-row">
+        <button class="btn btn-g" onclick="computeH()">Compute H</button>
+        <button class="btn btn-sm" onclick="copyH()">Copy H</button>
+        <button class="btn btn-sm" onclick="exportH()">Export .txt</button>
+    </div>
+    <div class="status" id="hStatus">Not computed</div>
+    <div class="h-matrix" id="hMatrix" style="display:none"></div>
+</div>
+
+<!-- §5 Origin -->
+<div class="section">
+    <div class="section-title">5. Origin (for lon/lat conversion)</div>
+    <div class="field-row">
+        <div class="field"><label>Longitude</label><input type="number" id="oriLon" step="0.000001" value="0"></div>
+        <div class="field"><label>Latitude</label><input type="number" id="oriLat" step="0.000001" value="0"></div>
+    </div>
+</div>
+
+<!-- §6 Validation -->
+<div class="section">
+    <div class="section-title">6. Validation Results</div>
+    <div class="btn-row">
+        <button class="btn btn-sm" onclick="measureDist()">Measure Distance</button>
+        <button class="btn btn-sm" onclick="exportValCsv()">Export CSV</button>
+        <button class="btn btn-sm btn-r" onclick="clearVal()">Clear</button>
+    </div>
+    <div class="val-list" id="valList"></div>
+    <div class="status" id="valStatus">Click in Validate mode to add points</div>
+</div>
+
+<!-- §7 Load existing H -->
+<div class="section">
+    <div class="section-title">7. Load Existing Homography</div>
+    <div class="field">
+        <textarea id="hInput" rows="3" placeholder="Paste 9 numbers: h00 h01 h02 h10 ..."></textarea>
+    </div>
+    <div class="btn-row">
+        <button class="btn btn-sm" onclick="$('hFile').click()">Load File</button>
+        <input type="file" id="hFile" accept=".txt,.csv,.npy,.json" style="display:none" onchange="loadHFile(this.files[0])">
+        <button class="btn btn-sm btn-g" onclick="applyH()">Apply</button>
+    </div>
+</div>
+
+</div><!-- left -->
+
+<div class="right">
+    <canvas id="cvs"></canvas>
+    <video id="vid"></video>
+    <div class="toolbar">
+        <button class="mode-btn active" id="modeGcp" onclick="setMode('gcp')">GCP Mode</button>
+        <button class="mode-btn" id="modeVal" onclick="setMode('validate')">Validate Mode</button>
+        <span style="flex:1"></span>
+        <span style="font-size:11px;color:var(--dim)" id="cursorInfo">—</span>
+    </div>
+</div>
+</div><!-- main -->
+
+<!-- Modal for GCP input -->
+<div class="modal-overlay" id="gcpModal" style="display:none">
+<div class="modal">
+    <h3>Add GCP Point</h3>
+    <p style="font-size:12px;margin-bottom:8px">Pixel: <strong id="gcpPixel"></strong></p>
+    <div class="field"><label>Longitude Latitude (space separated)</label>
+        <input type="text" id="gcpLonLat" placeholder="e.g. 113.1041 23.4611">
+    </div>
+    <div class="btn-row" style="margin-top:12px">
+        <button class="btn btn-g" onclick="confirmGcp()">OK</button>
+        <button class="btn" onclick="cancelGcp()">Cancel</button>
+    </div>
+</div>
+</div>
+
+<!-- Modal for Validation input -->
+<div class="modal-overlay" id="valModal" style="display:none">
+<div class="modal">
+    <h3>Validate Point</h3>
+    <p style="font-size:12px">Pixel: <strong id="valPixel"></strong></p>
+    <div class="pred" id="valPred"></div>
+    <div class="field"><label>True coordinates (lon lat, or leave blank to accept predicted)</label>
+        <input type="text" id="valTrue" placeholder="e.g. 113.1041 23.4611">
+    </div>
+    <div class="btn-row" style="margin-top:12px">
+        <button class="btn btn-g" onclick="confirmVal()">OK</button>
+        <button class="btn" onclick="cancelVal()">Cancel</button>
+    </div>
+</div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const vid=$('vid'),cvs=$('cvs'),cx=cvs.getContext('2d');
+
+/* ══════════════ STATE ══════════════ */
+let currentFrame=0, totalFrames=0, videoLoaded=false;
+let mode='gcp'; // 'gcp' or 'validate'
+let cameraMatrix=null, distCoeffs=null;
+let H=null; // flat 9-element array
+let gcpPoints=[]; // [{imgX,imgY,lon,lat}]
+let valResults=[]; // [{frame,imgX,imgY,predGx,predGy,predLon,predLat,trueGx,trueGy,trueLon,trueLat,errorM}]
+let valSelected=new Set();
+let pendingClick=null; // {x,y} for modal
+
+/* ══════════════ COORDINATE TRANSFORMS ══════════════ */
+function perspectiveTransform(px,py,Hf){
+    if(!Hf)return null;
+    const w=Hf[6]*px+Hf[7]*py+Hf[8];
+    if(Math.abs(w)<1e-12)return null;
+    return [(Hf[0]*px+Hf[1]*py+Hf[2])/w,(Hf[3]*px+Hf[4]*py+Hf[5])/w];
+}
+
+function undistortPoint(px,py,K,dist){
+    if(!K||!dist)return[px,py];
+    const fx=K[0],fy=K[4],cx_=K[2],cy_=K[5];
+    let x=(px-cx_)/fx,y=(py-cy_)/fy;
+    const k1=dist[0]||0,k2=dist[1]||0,p1=dist[2]||0,p2=dist[3]||0,k3=dist[4]||0;
+    const x0=x,y0=y;
+    for(let i=0;i<10;i++){
+        const r2=x*x+y*y,r4=r2*r2,r6=r4*r2;
+        const rad=1+k1*r2+k2*r4+k3*r6;
+        const dx=2*p1*x*y+p2*(r2+2*x*x);
+        const dy=p1*(r2+2*y*y)+2*p2*x*y;
+        x=(x0-dx)/rad; y=(y0-dy)/rad;
+    }
+    return[x*fx+cx_,y*fy+cy_];
+}
+
+function latLonToUtm(lat,lon){
+    const zone=Math.floor((lon+180)/6)+1, isNorth=lat>=0;
+    const k0=0.9996,a=6378137,f=1/298.257223563;
+    const n=f/(2-f),n2=n*n,n3=n2*n,n4=n3*n;
+    const A=a/(1+n)*(1+n2/4+n4/64);
+    const lr=lat*Math.PI/180, lonr=lon*Math.PI/180, lon0=(zone*6-183)*Math.PI/180;
+    const t=Math.sinh(Math.atanh(Math.sin(lr))-2*Math.sqrt(n)/(1+n)*Math.atanh(2*Math.sqrt(n)/(1+n)*Math.sin(lr)));
+    const xi_=Math.atan2(t,Math.cos(lonr-lon0));
+    const eta_=Math.atanh(Math.sin(lonr-lon0)/Math.sqrt(1+t*t));
+    const a1=.5*n-2/3*n2+5/16*n3, a2=13/48*n2-3/5*n3, a3=61/240*n3;
+    let xi=xi_,eta=eta_;
+    for(let j=1;j<=3;j++){const aj=[0,a1,a2,a3][j];xi+=aj*Math.sin(2*j*xi_)*Math.cosh(2*j*eta_);eta+=aj*Math.cos(2*j*xi_)*Math.sinh(2*j*eta_)}
+    const E=eta*k0*A+500000, N=xi*k0*A+(isNorth?0:10000000);
+    return[E,N,zone,isNorth];
+}
+
+function utmToLatLon(E,N,zone,isNorth){
+    const k0=0.9996,a=6378137,f=1/298.257223563;
+    const n=f/(2-f),n2=n*n,n3=n2*n,n4=n3*n;
+    const A=a/(1+n)*(1+n2/4+n4/64);
+    const x=E-500000, y=isNorth?N:N-10000000;
+    const xi=y/(k0*A), eta=x/(k0*A);
+    const b1=.5*n-2/3*n2+37/96*n3, b2=n2/48+n3/15, b3=17/480*n3;
+    let xi_=xi,eta_=eta;
+    for(let j=1;j<=3;j++){const bj=[0,b1,b2,b3][j];xi_-=bj*Math.sin(2*j*xi)*Math.cosh(2*j*eta);eta_-=bj*Math.cos(2*j*xi)*Math.sinh(2*j*eta)}
+    const chi=Math.asin(Math.sin(xi_)/Math.cosh(eta_));
+    const d1=2*n-2/3*n2-2*n3, d2=7/3*n2-8/5*n3, d3=56/15*n3;
+    let lat=chi+d1*Math.sin(2*chi)+d2*Math.sin(4*chi)+d3*Math.sin(6*chi);
+    let lon=Math.atan2(Math.sinh(eta_),Math.cos(xi_));
+    return[lat*180/Math.PI, lon*180/Math.PI+(zone*6-183)];
+}
+
+function groundToLatLon(gx,gy){
+    const oLon=+$('oriLon').value, oLat=+$('oriLat').value;
+    if(!oLon&&!oLat)return null;
+    const[oE,oN,zone,isNorth]=latLonToUtm(oLat,oLon);
+    return utmToLatLon(gx+oE,gy+oN,zone,isNorth);
+}
+
+function latLonToLocal(lon,lat){
+    const oLon=+$('oriLon').value, oLat=+$('oriLat').value;
+    const[oE,oN,zone]=latLonToUtm(oLat,oLon);
+    const[E,N]=latLonToUtm(lat,lon);
+    return[E-oE,N-oN];
+}
+
+/* ══════════════ FIND HOMOGRAPHY (DLT + RANSAC) ══════════════ */
+function solveDLT4(src,dst){
+    // src,dst: arrays of 4 [x,y] pairs. Returns flat H[9] or null.
+    const n=src.length;
+    if(n<4)return null;
+    // Build 2n x 9 matrix A
+    const A=[];
+    for(let i=0;i<n;i++){
+        const[x,y]=src[i],[u,v]=dst[i];
+        A.push([-x,-y,-1,0,0,0,u*x,u*y,u]);
+        A.push([0,0,0,-x,-y,-1,v*x,v*y,v]);
+    }
+    // SVD via A^T A eigenvector for smallest eigenvalue
+    // For a 9x9 symmetric matrix, use power iteration on inverse
+    const m=A.length, cols=9;
+    // Compute AtA = A^T * A (9x9)
+    const AtA=Array.from({length:cols},()=>new Float64Array(cols));
+    for(let i=0;i<cols;i++)for(let j=i;j<cols;j++){
+        let s=0;for(let k=0;k<m;k++)s+=A[k][i]*A[k][j];
+        AtA[i][j]=s;AtA[j][i]=s;
+    }
+    // Find smallest eigenvector using inverse iteration
+    // First shift: use Gershgorin to find a safe shift
+    let shift=0;
+    for(let i=0;i<cols;i++){let r=0;for(let j=0;j<cols;j++)if(j!==i)r+=Math.abs(AtA[i][j]);shift=Math.max(shift,AtA[i][i]+r)}
+    shift*=1.01; // shift above max eigenvalue
+    // (shift*I - AtA) * x = b  => inverse iteration for smallest eigenvalue of AtA
+    const M=Array.from({length:cols},(_,i)=>{const row=new Float64Array(cols);for(let j=0;j<cols;j++)row[j]=-AtA[i][j];row[i]+=shift;return row});
+    // LU decomposition of M
+    const LU=M.map(r=>Float64Array.from(r));
+    const piv=Array.from({length:cols},(_,i)=>i);
+    for(let k=0;k<cols;k++){
+        let mx=Math.abs(LU[k][k]),mi=k;
+        for(let i=k+1;i<cols;i++){const v=Math.abs(LU[i][k]);if(v>mx){mx=v;mi=i}}
+        if(mi!==k){[LU[k],LU[mi]]=[LU[mi],LU[k]];[piv[k],piv[mi]]=[piv[mi],piv[k]]}
+        if(Math.abs(LU[k][k])<1e-14)return null;
+        for(let i=k+1;i<cols;i++){LU[i][k]/=LU[k][k];for(let j=k+1;j<cols;j++)LU[i][j]-=LU[i][k]*LU[k][j]}
+    }
+    function luSolve(b){
+        const x=new Float64Array(cols);
+        const pb=new Float64Array(cols);
+        for(let i=0;i<cols;i++)pb[i]=b[piv[i]];
+        for(let i=0;i<cols;i++){x[i]=pb[i];for(let j=0;j<i;j++)x[i]-=LU[i][j]*x[j]}
+        for(let i=cols-1;i>=0;i--){for(let j=i+1;j<cols;j++)x[i]-=LU[i][j]*x[j];x[i]/=LU[i][i]}
+        return x;
+    }
+    // Inverse iteration: 20 iterations
+    let v=new Float64Array(cols).fill(1);
+    for(let iter=0;iter<30;iter++){
+        v=luSolve(v);
+        let norm=0;for(let i=0;i<cols;i++)norm+=v[i]*v[i];
+        norm=Math.sqrt(norm);
+        if(norm<1e-30)return null;
+        for(let i=0;i<cols;i++)v[i]/=norm;
+    }
+    // Normalize so v[8]=1 if possible
+    if(Math.abs(v[8])>1e-12)for(let i=0;i<9;i++)v[i]/=v[8];
+    return Array.from(v);
+}
+
+function reprojectError(Hf,src,dst){
+    const gx=(Hf[0]*src[0]+Hf[1]*src[1]+Hf[2]);
+    const gy=(Hf[3]*src[0]+Hf[4]*src[1]+Hf[5]);
+    const w=(Hf[6]*src[0]+Hf[7]*src[1]+Hf[8]);
+    if(Math.abs(w)<1e-12)return 1e10;
+    const dx=gx/w-dst[0],dy=gy/w-dst[1];
+    return Math.sqrt(dx*dx+dy*dy);
+}
+
+function findHomographyRANSAC(srcPts,dstPts,thresh,maxIter){
+    const n=srcPts.length;
+    if(n<4)return null;
+    if(n===4)return{H:solveDLT4(srcPts,dstPts),inliers:new Array(4).fill(true),rmse:0};
+    let bestH=null,bestInliers=[],bestCount=0;
+    for(let it=0;it<maxIter;it++){
+        // Random 4 indices
+        const idx=new Set();
+        while(idx.size<4)idx.add(Math.floor(Math.random()*n));
+        const si=[],di=[];
+        for(const i of idx){si.push(srcPts[i]);di.push(dstPts[i])}
+        const Hc=solveDLT4(si,di);
+        if(!Hc)continue;
+        // Count inliers
+        const inl=[];let cnt=0;
+        for(let i=0;i<n;i++){
+            const e=reprojectError(Hc,srcPts[i],dstPts[i]);
+            const ok=e<thresh;inl.push(ok);if(ok)cnt++;
+        }
+        if(cnt>bestCount){bestCount=cnt;bestH=Hc;bestInliers=inl}
+    }
+    if(!bestH)return null;
+    // Refit on all inliers
+    const si=[],di=[];
+    for(let i=0;i<n;i++)if(bestInliers[i]){si.push(srcPts[i]);di.push(dstPts[i])}
+    if(si.length>=4){
+        const Hr=solveDLT4(si,di);
+        if(Hr)bestH=Hr;
+    }
+    // Compute RMSE on inliers
+    let sse=0,cnt=0;
+    const finalInliers=[];
+    for(let i=0;i<n;i++){
+        const e=reprojectError(bestH,srcPts[i],dstPts[i]);
+        const ok=e<thresh;finalInliers.push(ok);
+        if(ok){sse+=e*e;cnt++}
+    }
+    const rmse=cnt>0?Math.sqrt(sse/cnt):NaN;
+    return{H:bestH,inliers:finalInliers,rmse};
+}
+
+/* ══════════════ VIDEO ══════════════ */
+function loadVideo(f){
+    if(!f)return;
+    vid.src=URL.createObjectURL(f);
+    vid.onloadedmetadata=()=>{
+        totalFrames=Math.round(vid.duration*30); // estimate
+        $('slider').max=totalFrames-1;
+        $('totalFrames').value=totalFrames;
+        videoLoaded=true;
+        cvs.width=vid.videoWidth;cvs.height=vid.videoHeight;
+        seekFrame(0);
+        $('frameInfo').textContent=vid.videoWidth+'x'+vid.videoHeight+' ~'+totalFrames+' frames';
+    };
+}
+
+function seekFrame(idx){
+    if(!videoLoaded)return;
+    idx=Math.max(0,Math.min(totalFrames-1,Math.round(idx)));
+    currentFrame=idx;
+    $('slider').value=idx;
+    $('frameNum').value=idx;
+    vid.currentTime=idx/30;
+    vid.addEventListener('seeked',function h(){
+        vid.removeEventListener('seeked',h);
+        drawFrame();
+    });
+}
+
+function drawFrame(){
+    cx.drawImage(vid,0,0,cvs.width,cvs.height);
+    // Draw GCP points
+    for(let i=0;i<gcpPoints.length;i++){
+        const p=gcpPoints[i];
+        cx.beginPath();cx.arc(p.imgX,p.imgY,6,0,Math.PI*2);
+        cx.fillStyle='rgba(0,212,170,.7)';cx.fill();
+        cx.strokeStyle='#fff';cx.lineWidth=2;cx.stroke();
+        cx.fillStyle='#fff';cx.font='bold 11px sans-serif';cx.textAlign='center';
+        cx.fillText(''+(i+1),p.imgX,p.imgY-10);
+    }
+    // Draw validation points
+    for(let i=0;i<valResults.length;i++){
+        const r=valResults[i];
+        cx.beginPath();cx.arc(r.imgX,r.imgY,5,0,Math.PI*2);
+        cx.fillStyle=valSelected.has(i)?'#f28b82':'rgba(148,103,255,.7)';cx.fill();
+        cx.strokeStyle='#fff';cx.lineWidth=1.5;cx.stroke();
+        cx.fillStyle='#fff';cx.font='10px sans-serif';cx.textAlign='center';
+        cx.fillText('V'+(i+1),r.imgX,r.imgY-8);
+    }
+}
+
+/* ══════════════ CANVAS CLICK ══════════════ */
+cvs.addEventListener('click',e=>{
+    if(!videoLoaded)return;
+    const rect=cvs.getBoundingClientRect();
+    const sx=cvs.width/rect.width, sy=cvs.height/rect.height;
+    const imgX=Math.round((e.clientX-rect.left)*sx);
+    const imgY=Math.round((e.clientY-rect.top)*sy);
+
+    if(mode==='gcp'){
+        pendingClick={x:imgX,y:imgY};
+        $('gcpPixel').textContent='('+imgX+', '+imgY+')';
+        $('gcpLonLat').value='';
+        $('gcpModal').style.display='flex';
+        $('gcpLonLat').focus();
+    }else{
+        if(!H){alert('Please compute or load a Homography first.');return}
+        pendingClick={x:imgX,y:imgY};
+        $('valPixel').textContent='('+imgX+', '+imgY+')';
+        // Compute predicted
+        let ux=imgX,uy=imgY;
+        if(cameraMatrix&&distCoeffs)[ux,uy]=undistortPoint(imgX,imgY,cameraMatrix,distCoeffs);
+        const gp=perspectiveTransform(ux,uy,H);
+        let predStr='Predicted ground: ('+gp[0].toFixed(4)+', '+gp[1].toFixed(4)+')';
+        const ll=groundToLatLon(gp[0],gp[1]);
+        if(ll)predStr+='\nPredicted lon/lat: ('+ll[1].toFixed(9)+', '+ll[0].toFixed(9)+')';
+        $('valPred').textContent=predStr;
+        $('valTrue').value=ll?ll[1].toFixed(9)+' '+ll[0].toFixed(9):'';
+        $('valModal').style.display='flex';
+        $('valTrue').focus();
+    }
+});
+
+cvs.addEventListener('mousemove',e=>{
+    if(!videoLoaded)return;
+    const rect=cvs.getBoundingClientRect();
+    const sx=cvs.width/rect.width,sy=cvs.height/rect.height;
+    const ix=Math.round((e.clientX-rect.left)*sx),iy=Math.round((e.clientY-rect.top)*sy);
+    let info='px('+ix+','+iy+')';
+    if(H){
+        let ux=ix,uy=iy;
+        if(cameraMatrix&&distCoeffs)[ux,uy]=undistortPoint(ix,iy,cameraMatrix,distCoeffs);
+        const gp=perspectiveTransform(ux,uy,H);
+        if(gp)info+=' → ground('+gp[0].toFixed(2)+','+gp[1].toFixed(2)+')';
+    }
+    $('cursorInfo').textContent=info;
+});
+
+/* ══════════════ GCP MODAL ══════════════ */
+function confirmGcp(){
+    const txt=$('gcpLonLat').value.trim();
+    if(!txt){cancelGcp();return}
+    const parts=txt.split(/[\s,]+/);
+    if(parts.length!==2){alert('Enter lon lat separated by space');return}
+    const lon=parseFloat(parts[0]),lat=parseFloat(parts[1]);
+    if(!isFinite(lon)||!isFinite(lat)){alert('Invalid numbers');return}
+    gcpPoints.push({imgX:pendingClick.x,imgY:pendingClick.y,lon,lat});
+    // Auto-set origin from first point
+    if(gcpPoints.length===1&&!+$('oriLon').value&&!+$('oriLat').value){
+        $('oriLon').value=lon;$('oriLat').value=lat;
+    }
+    $('gcpModal').style.display='none';
+    updateGcpUI();drawFrame();
+}
+function cancelGcp(){$('gcpModal').style.display='none'}
+$('gcpLonLat').addEventListener('keydown',e=>{if(e.key==='Enter')confirmGcp();if(e.key==='Escape')cancelGcp()});
+
+function updateGcpUI(){
+    const el=$('gcpList');
+    el.innerHTML=gcpPoints.map((p,i)=>
+        '<div class="gcp-item"><span>'+(i+1)+': px('+p.imgX+','+p.imgY+') → ('+p.lon.toFixed(7)+', '+p.lat.toFixed(7)+')</span><span class="del" onclick="delGcp('+i+')">✕</span></div>'
+    ).join('');
+    $('gcpStatus').textContent=gcpPoints.length+' points'+(gcpPoints.length<4?' — need at least 4':'');
+    $('gcpStatus').className='status'+(gcpPoints.length>=4?' ok':'');
+}
+
+function delGcp(i){gcpPoints.splice(i,1);updateGcpUI();drawFrame()}
+function clearGcp(){gcpPoints=[];updateGcpUI();drawFrame()}
+
+/* ══════════════ GCP CSV IMPORT/EXPORT ══════════════ */
+function importGcpCsv(f){
+    if(!f)return;
+    const reader=new FileReader();
+    reader.onload=e=>{
+        const lines=e.target.result.trim().split('\n');
+        if(lines.length<2){alert('CSV is empty');return}
+        const header=lines[0].toLowerCase().split(',').map(s=>s.trim());
+        const iX=header.indexOf('image_x')>=0?header.indexOf('image_x'):header.indexOf('u');
+        const iY=header.indexOf('image_y')>=0?header.indexOf('image_y'):header.indexOf('v');
+        const iLon=header.indexOf('lon')>=0?header.indexOf('lon'):header.indexOf('longitude');
+        const iLat=header.indexOf('lat')>=0?header.indexOf('lat'):header.indexOf('latitude');
+        if(iX<0||iY<0){alert('CSV must have image_x,image_y columns');return}
+        gcpPoints=[];
+        for(let r=1;r<lines.length;r++){
+            const cols=lines[r].split(',').map(s=>s.trim());
+            if(cols.length<2)continue;
+            const p={imgX:+cols[iX],imgY:+cols[iY],lon:iLon>=0?+cols[iLon]:0,lat:iLat>=0?+cols[iLat]:0};
+            gcpPoints.push(p);
+        }
+        updateGcpUI();drawFrame();
+    };
+    reader.readAsText(f);
+}
+
+function exportGcpCsv(){
+    if(!gcpPoints.length){alert('No GCP points');return}
+    let csv='image_x,image_y,lon,lat\n';
+    for(const p of gcpPoints)csv+=p.imgX+','+p.imgY+','+p.lon+','+p.lat+'\n';
+    downloadText(csv,'gcp_points.csv');
+}
+
+/* ══════════════ CAMERA PARAMS ══════════════ */
+function loadCamParams(f){
+    if(!f)return;
+    const reader=new FileReader();
+    reader.onload=e=>{
+        try{
+            const data=JSON.parse(e.target.result);
+            const K=data.camera_matrix||data.K;
+            const dist=data.dist_coeffs||data.dist;
+            if(!K||!dist)throw new Error('Missing camera_matrix/K or dist_coeffs/dist');
+            cameraMatrix=Array.isArray(K[0])?K.flat():Array.from(K);
+            distCoeffs=Array.isArray(dist[0])?dist.flat():Array.from(dist);
+            $('camStatus').textContent='Loaded: K('+cameraMatrix.length+') dist('+distCoeffs.length+')';
+            $('camStatus').className='status ok';
+        }catch(err){
+            $('camStatus').textContent='Error: '+err.message;
+            $('camStatus').className='status err';
+        }
+    };
+    reader.readAsText(f);
+}
+
+/* ══════════════ COMPUTE H ══════════════ */
+function computeH(){
+    if(gcpPoints.length<4){alert('Need at least 4 GCP points');return}
+    const oLon=+$('oriLon').value,oLat=+$('oriLat').value;
+    if(!oLon&&!oLat){alert('Set origin lon/lat first');return}
+    const doUndist=+$('undistGcp').value&&cameraMatrix&&distCoeffs;
+    // Build src (pixel) and dst (local ground meters) arrays
+    const src=[],dst=[];
+    for(const p of gcpPoints){
+        let px=p.imgX,py=p.imgY;
+        if(doUndist)[px,py]=undistortPoint(px,py,cameraMatrix,distCoeffs);
+        src.push([px,py]);
+        const[gx,gy]=latLonToLocal(p.lon,p.lat);
+        dst.push([gx,gy]);
+    }
+    const thresh=+$('ransacThresh').value||3;
+    const result=findHomographyRANSAC(src,dst,thresh,1000);
+    if(!result||!result.H){
+        $('hStatus').textContent='Failed to compute H';$('hStatus').className='status err';return;
+    }
+    H=result.H;
+    const inlierCount=result.inliers.filter(Boolean).length;
+    $('hStatus').textContent='RMSE: '+result.rmse.toFixed(4)+' m | Inliers: '+inlierCount+'/'+gcpPoints.length;
+    $('hStatus').className='status ok';
+    // Display matrix
+    const m=$('hMatrix');m.style.display='block';
+    m.textContent=formatH(H);
+    drawFrame();
+}
+
+function formatH(Hf){
+    return[0,1,2].map(r=>[0,1,2].map(c=>Hf[r*3+c].toExponential(8)).join('  ')).join('\n');
+}
+
+function copyH(){
+    if(!H)return;
+    navigator.clipboard.writeText(H.join(' ')).then(()=>$('hStatus').textContent='Copied to clipboard');
+}
+
+function exportH(){
+    if(!H)return;
+    downloadText(formatH(H),'homography.txt');
+}
+
+/* ══════════════ LOAD EXISTING H ══════════════ */
+function loadHFile(f){
+    if(!f)return;
+    const reader=new FileReader();
+    reader.onload=e=>{$('hInput').value=e.target.result};
+    reader.readAsText(f);
+}
+
+function applyH(){
+    const txt=$('hInput').value;
+    const nums=txt.match(/[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?/g);
+    if(!nums||nums.length!==9){alert('Need exactly 9 numbers');return}
+    H=nums.map(Number);
+    // Normalize by H[8]
+    if(Math.abs(H[8])>1e-12)H=H.map(v=>v/H[8]);
+    $('hStatus').textContent='H applied (loaded)';$('hStatus').className='status ok';
+    $('hMatrix').style.display='block';$('hMatrix').textContent=formatH(H);
+    drawFrame();
+}
+
+/* ══════════════ VALIDATION MODAL ══════════════ */
+function confirmVal(){
+    const imgX=pendingClick.x,imgY=pendingClick.y;
+    let ux=imgX,uy=imgY;
+    if(cameraMatrix&&distCoeffs)[ux,uy]=undistortPoint(imgX,imgY,cameraMatrix,distCoeffs);
+    const gp=perspectiveTransform(ux,uy,H);
+    const predGx=gp[0],predGy=gp[1];
+    const ll=groundToLatLon(predGx,predGy);
+    const predLon=ll?ll[1]:null,predLat=ll?ll[0]:null;
+
+    const txt=$('valTrue').value.trim();
+    let trueLon=predLon,trueLat=predLat,trueGx=predGx,trueGy=predGy;
+    if(txt){
+        const parts=txt.split(/[\s,]+/);
+        if(parts.length>=2){
+            trueLon=parseFloat(parts[0]);trueLat=parseFloat(parts[1]);
+            const[gx,gy]=latLonToLocal(trueLon,trueLat);
+            trueGx=gx;trueGy=gy;
+        }
+    }
+    const errorM=Math.sqrt((predGx-trueGx)**2+(predGy-trueGy)**2);
+
+    valResults.push({frame:currentFrame,imgX,imgY,predGx,predGy,predLon,predLat,trueGx,trueGy,trueLon,trueLat,errorM});
+    $('valModal').style.display='none';
+    updateValUI();drawFrame();
+}
+function cancelVal(){$('valModal').style.display='none'}
+$('valTrue').addEventListener('keydown',e=>{if(e.key==='Enter')confirmVal();if(e.key==='Escape')cancelVal()});
+
+function updateValUI(){
+    const el=$('valList');
+    el.innerHTML=valResults.map((r,i)=>{
+        const sel=valSelected.has(i)?'background:#333':'';
+        return '<div class="val-item" style="'+sel+'" onclick="toggleValSel('+i+')">'
+            +'<span>V'+(i+1)+' f'+r.frame+' err=<b>'+r.errorM.toFixed(3)+'m</b> px('+r.imgX+','+r.imgY+')</span>'
+            +'</div>';
+    }).join('');
+    // RMSE
+    if(valResults.length>0){
+        const rmse=Math.sqrt(valResults.reduce((s,r)=>s+r.errorM**2,0)/valResults.length);
+        $('valStatus').textContent='Total RMSE: '+rmse.toFixed(4)+' m ('+valResults.length+' points)';
+        $('valStatus').className='status ok';
+    }
+}
+
+function toggleValSel(i){
+    if(valSelected.has(i))valSelected.delete(i);else{if(valSelected.size>=2)valSelected.clear();valSelected.add(i)}
+    updateValUI();drawFrame();
+}
+
+function measureDist(){
+    if(valSelected.size!==2){alert('Select exactly 2 validation points');return}
+    const[i,j]=[...valSelected];
+    const r1=valResults[i],r2=valResults[j];
+    const dPred=Math.sqrt((r1.predGx-r2.predGx)**2+(r1.predGy-r2.predGy)**2);
+    const dTrue=Math.sqrt((r1.trueGx-r2.trueGx)**2+(r1.trueGy-r2.trueGy)**2);
+    alert('Predicted distance: '+dPred.toFixed(3)+' m\nTrue distance: '+dTrue.toFixed(3)+' m\nDifference: '+(dPred-dTrue).toFixed(3)+' m');
+}
+
+function clearVal(){valResults=[];valSelected.clear();updateValUI();drawFrame()}
+
+function exportValCsv(){
+    if(!valResults.length){alert('No validation results');return}
+    let csv='frame,img_x,img_y,pred_gx,pred_gy,pred_lon,pred_lat,true_gx,true_gy,true_lon,true_lat,error_m\n';
+    for(const r of valResults){
+        csv+=[r.frame,r.imgX,r.imgY,r.predGx.toFixed(6),r.predGy.toFixed(6),
+              r.predLon!=null?r.predLon.toFixed(9):'',r.predLat!=null?r.predLat.toFixed(9):'',
+              r.trueGx.toFixed(6),r.trueGy.toFixed(6),
+              r.trueLon!=null?r.trueLon.toFixed(9):'',r.trueLat!=null?r.trueLat.toFixed(9):'',
+              r.errorM.toFixed(6)].join(',')+'\n';
+    }
+    downloadText(csv,'validation_results.csv');
+}
+
+/* ══════════════ MODE ══════════════ */
+function setMode(m){
+    mode=m;
+    $('modeGcp').classList.toggle('active',m==='gcp');
+    $('modeVal').classList.toggle('active',m==='validate');
+}
+
+/* ══════════════ UTIL ══════════════ */
+function downloadText(text,filename){
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(new Blob([text],{type:'text/plain'}));
+    a.download=filename;a.click();
+}
+
+// Init
+setMode('gcp');
+</script>
+</body>
+</html>
