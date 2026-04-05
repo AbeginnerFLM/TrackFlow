@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TrackFlow Calibration</title>
+  <link rel="stylesheet" href="./assets/css/base.css">
+  <link rel="stylesheet" href="./assets/css/calibration.css">
+</head>
+<body>
+  <header>
+    <h1>TrackFlow Calibration Tool</h1>
+    <a href="./inference.html">&larr; Back to Inference</a>
+    <span style="flex:1"></span>
+    <span id="frameInfo" style="font-size:1.2rem;color:var(--text3)">No video loaded</span>
+  </header>
+
+  <div class="main">
+    <div class="left">
+      <div class="section">
+        <div class="section-title">1. Video</div>
+        <div class="btn-row">
+          <button class="btn" id="openVideoBtn">Open Video</button>
+          <input type="file" id="vidFile" accept="video/*" style="display:none">
+        </div>
+        <input type="range" id="slider" min="0" max="0" value="0">
+        <div class="field-row" style="margin-top:.4rem">
+          <div class="field"><label>Frame</label><input type="number" id="frameNum" value="0" min="0"></div>
+          <div class="field"><label>Total</label><input type="text" id="totalFrames" value="0" readonly></div>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-sm" id="prevFrameBtn">&laquo; Prev</button>
+          <button class="btn btn-sm" id="nextFrameBtn">Next &raquo;</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">2. Camera Parameters (optional)</div>
+        <div class="btn-row">
+          <button class="btn" id="openCamBtn">Load JSON</button>
+          <input type="file" id="camFile" accept=".json" style="display:none">
+        </div>
+        <div class="status" id="camStatus">Not loaded</div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">3. GCP Points</div>
+        <div class="btn-row">
+          <button class="btn btn-sm" id="importGcpBtn">Import CSV</button>
+          <input type="file" id="gcpFile" accept=".csv" style="display:none">
+          <button class="btn btn-sm" id="exportGcpBtn">Export CSV</button>
+          <button class="btn btn-sm btn-r" id="clearGcpBtn">Clear</button>
+        </div>
+        <div class="gcp-list" id="gcpList"></div>
+        <div class="status" id="gcpStatus">0 points — need at least 4</div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">4. Compute Homography</div>
+        <div class="field-row">
+          <div class="field"><label>RANSAC Threshold (px)</label><input type="number" id="ransacThresh" value="3" step="0.5" min="0.5"></div>
+          <div class="field"><label>Undistort GCP</label><select id="undistGcp"><option value="0">No</option><option value="1">Yes</option></select></div>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-g" id="computeHBtn">Compute H</button>
+          <button class="btn btn-sm" id="copyHBtn">Copy H</button>
+          <button class="btn btn-sm" id="exportHBtn">Export .txt</button>
+        </div>
+        <div class="status" id="hStatus">Not computed</div>
+        <div class="h-matrix" id="hMatrix" style="display:none"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">5. Origin (for lon/lat conversion)</div>
+        <div class="field-row">
+          <div class="field"><label>Longitude</label><input type="number" id="oriLon" step="0.000001" value="0"></div>
+          <div class="field"><label>Latitude</label><input type="number" id="oriLat" step="0.000001" value="0"></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">6. Validation Results</div>
+        <div class="btn-row">
+          <button class="btn btn-sm" id="measureBtn">Measure Distance</button>
+          <button class="btn btn-sm" id="exportValBtn">Export CSV</button>
+          <button class="btn btn-sm btn-r" id="clearValBtn">Clear</button>
+        </div>
+        <div class="val-list" id="valList"></div>
+        <div class="status" id="valStatus">Click in Validate mode to add points</div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">7. Load Existing Homography</div>
+        <div class="field">
+          <textarea id="hInput" rows="3" placeholder="Paste 9 numbers: h00 h01 h02 h10 ..."></textarea>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-sm" id="openHBtn">Load File</button>
+          <input type="file" id="hFile" accept=".txt,.csv,.json" style="display:none">
+          <button class="btn btn-sm btn-g" id="applyHBtn">Apply</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="right">
+      <canvas id="cvs"></canvas>
+      <video id="vid"></video>
+      <div class="toolbar">
+        <button class="mode-btn active" id="modeGcp">GCP Mode</button>
+        <button class="mode-btn" id="modeVal">Validate Mode</button>
+        <span style="flex:1"></span>
+        <span style="font-size:1.1rem;color:var(--text3)" id="cursorInfo">—</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="gcpModal" style="display:none">
+    <div class="modal">
+      <h3>Add GCP Point</h3>
+      <p style="font-size:1.2rem;margin-bottom:.8rem">Pixel: <strong id="gcpPixel"></strong></p>
+      <div class="field"><label>Longitude Latitude (space separated)</label>
+        <input type="text" id="gcpLonLat" placeholder="e.g. 113.1041 23.4611">
+      </div>
+      <div class="btn-row" style="margin-top:1.2rem">
+        <button class="btn btn-g" id="confirmGcpBtn">OK</button>
+        <button class="btn" id="cancelGcpBtn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="valModal" style="display:none">
+    <div class="modal">
+      <h3>Validate Point</h3>
+      <p style="font-size:1.2rem">Pixel: <strong id="valPixel"></strong></p>
+      <div class="pred" id="valPred"></div>
+      <div class="field"><label>True coordinates (lon lat, or leave blank to accept predicted)</label>
+        <input type="text" id="valTrue" placeholder="e.g. 113.1041 23.4611">
+      </div>
+      <div class="btn-row" style="margin-top:1.2rem">
+        <button class="btn btn-g" id="confirmValBtn">OK</button>
+        <button class="btn" id="cancelValBtn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./assets/js/calibration/app.js"></script>
+</body>
+</html>

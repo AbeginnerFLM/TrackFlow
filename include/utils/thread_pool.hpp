@@ -4,6 +4,7 @@
 #include <functional>
 #include <future>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <stdexcept>
 #include <thread>
@@ -20,8 +21,10 @@ public:
   /**
    * 构造函数
    * @param num_threads 线程数量
+   * @param max_pending 最大排队任务数（0 表示无限制）
    */
-  explicit ThreadPool(size_t num_threads) : stop_(false) {
+  explicit ThreadPool(size_t num_threads, size_t max_pending = 0)
+      : max_pending_(max_pending), stop_(false) {
     workers_.reserve(num_threads);
 
     for (size_t i = 0; i < num_threads; ++i) {
@@ -76,11 +79,46 @@ public:
         throw std::runtime_error("Cannot enqueue on stopped ThreadPool");
       }
 
+      if (max_pending_ > 0 && tasks_.size() >= max_pending_) {
+        throw std::runtime_error("ThreadPool queue is full");
+      }
+
       tasks_.emplace([task]() { (*task)(); });
     }
 
     condition_.notify_one();
     return result;
+  }
+
+  template <typename F, typename... Args>
+  auto try_enqueue(F &&f, Args &&...args)
+      -> std::optional<std::future<std::invoke_result_t<F, Args...>>> {
+    using ReturnType = std::invoke_result_t<F, Args...>;
+
+    auto task = std::make_shared<std::packaged_task<ReturnType()>>(
+        [func = std::forward<F>(f),
+         ... captured_args = std::forward<Args>(args)]() mutable {
+          return std::invoke(std::move(func), std::move(captured_args)...);
+        });
+
+    std::future<ReturnType> result = task->get_future();
+
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+
+      if (stop_) {
+        return std::nullopt;
+      }
+
+      if (max_pending_ > 0 && tasks_.size() >= max_pending_) {
+        return std::nullopt;
+      }
+
+      tasks_.emplace([task]() { (*task)(); });
+    }
+
+    condition_.notify_one();
+    return std::optional<std::future<ReturnType>>(std::move(result));
   }
 
   /**
@@ -95,6 +133,8 @@ public:
     std::unique_lock<std::mutex> lock(mutex_);
     return tasks_.size();
   }
+
+  size_t max_pending() const { return max_pending_; }
 
 private:
   void worker_loop() {
@@ -123,6 +163,7 @@ private:
 
   mutable std::mutex mutex_;
   std::condition_variable condition_;
+  size_t max_pending_ = 0;
   bool stop_;
 };
 

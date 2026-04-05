@@ -4,19 +4,44 @@ server:
   port: 9001
   threads: 8
 
-models:
-  yolo:
-    path: "models/yolo26.onnx"
-    confidence: 0.5
-    nms_threshold: 0.45
-    is_obb: true
-    use_cuda: true
+yolo:
+  model_path: "models/3class4batch.onnx"
+  confidence: 0.5
+  nms_threshold: 0.45
+  is_obb: true
+  use_cuda: true
+  ort_threads: 4
+  batch_size: 4
+  batch_wait_ms: 8
+  batch_max_pending: 16
+  class_names: ["car", "pedestrian", "two-wheeler"]
 
 tracker:
   track_thresh: 0.5
   high_thresh: 0.6
   match_thresh: 0.8
   max_time_lost: 30
+  min_hits: 3
+
+features:
+  tracker: true
+  undistort: false
+  geo_transform: false
+
+limits:
+  session_timeout_sec: 300
+  max_payload_bytes: 104857600
+  max_pending_tasks: 32
+  max_pending_batches: 16
+  max_requests_per_session: 4
+  confidence_min: 0.05
+  confidence_max: 0.95
+  nms_min: 0.10
+  nms_max: 0.95
+  tracker_thresh_min: 0.05
+  tracker_thresh_max: 0.99
+  match_thresh_min: 0.10
+  match_thresh_max: 0.99
 
 logging:
-  level: "info"  # debug, info, warn, error
+  level: "info"

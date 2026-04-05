@@ -4,6 +4,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <optional>
+#include <vector>
 
 namespace yolo_edge {
 
@@ -17,10 +19,15 @@ struct ConnectionState {
   bool closed = false;
 };
 
+struct PendingRequest {
+  json header;
+  std::string request_id;
+  std::chrono::steady_clock::time_point received_at;
+};
+
 struct PerSocketData {
   std::string session_id;
-  bool waiting_for_image = false;
-  json pending_header;
+  std::optional<PendingRequest> pending;
   std::shared_ptr<ConnectionState> connection;
 };
 
@@ -28,7 +35,10 @@ using WsHandle = uWS::WebSocket<false, true, PerSocketData>;
 
 namespace {
 
-void defer_send_text(uWS::Loop *loop, const std::shared_ptr<ConnectionState> &connection,
+constexpr auto kPendingHeaderTimeout = std::chrono::seconds(10);
+
+void defer_send_text(uWS::Loop *loop,
+                     const std::shared_ptr<ConnectionState> &connection,
                      json response) {
   if (!loop || !connection) {
     return;
@@ -49,9 +59,9 @@ bool execute_default_pipeline(Session &session, ProcessingContext &ctx) {
   const auto start = Clock::now();
 
   int tracker_idx = session.pipeline.find_index("ByteTracker");
-  const size_t split = (tracker_idx >= 0)
-      ? static_cast<size_t>(tracker_idx)
-      : session.pipeline.size();
+  const size_t split =
+      (tracker_idx >= 0) ? static_cast<size_t>(tracker_idx)
+                         : session.pipeline.size();
   bool success = session.pipeline.execute_range(ctx, 0, split);
   if (session.pipeline.size() <= split) {
     const auto end = Clock::now();
@@ -60,8 +70,6 @@ bool execute_default_pipeline(Session &session, ProcessingContext &ctx) {
     return success;
   }
 
-  // 难点：即使前半段失败，也要消耗当前 frame_id 的 tracker 时序位，
-  // 否则后续帧会卡在 wait_for_turn，导致整个 session 堵塞。
   session.wait_for_turn(ctx.frame_id);
   try {
     if (success) {
@@ -79,6 +87,31 @@ bool execute_default_pipeline(Session &session, ProcessingContext &ctx) {
   return success;
 }
 
+bool copy_array_field(const json &src, const char *key, json &dst,
+                      size_t exact_size = 0) {
+  if (!src.contains(key) || !src[key].is_array()) {
+    return false;
+  }
+  if (exact_size > 0 && src[key].size() != exact_size) {
+    return false;
+  }
+  dst[key] = src[key];
+  return true;
+}
+
+bool has_camera_params(const json &cfg) {
+  return cfg.is_object() && cfg.contains("camera_matrix") &&
+         cfg["camera_matrix"].is_array() && cfg["camera_matrix"].size() == 9 &&
+         cfg.contains("dist_coeffs") && cfg["dist_coeffs"].is_array();
+}
+
+bool has_geo_params(const json &cfg) {
+  return cfg.is_object() && cfg.contains("homography") &&
+         cfg["homography"].is_array() && cfg["homography"].size() == 9 &&
+         cfg.contains("origin_lon") && cfg["origin_lon"].is_number() &&
+         cfg.contains("origin_lat") && cfg["origin_lat"].is_number();
+}
+
 } // namespace
 
 WebSocketServer::WebSocketServer(int port, ThreadPool &pool)
@@ -94,57 +127,60 @@ void WebSocketServer::run() {
   running_ = true;
   impl_->loop = uWS::Loop::get();
 
+  const json limits = server_config_.value("limits", json::object());
+  const int max_payload =
+      limits.value("max_payload_bytes", 100 * 1024 * 1024);
+
   uWS::App()
       .ws<PerSocketData>(
           "/*",
           {.compression = uWS::SHARED_COMPRESSOR,
-           .maxPayloadLength = 100 * 1024 * 1024,
+           .maxPayloadLength = static_cast<unsigned int>(max_payload),
            .idleTimeout = 120,
            .maxBackpressure = 16 * 1024 * 1024,
 
-           .open =
-               [](auto *ws) {
-                 auto *data = ws->getUserData();
-                 data->connection = std::make_shared<ConnectionState>();
-                 data->connection->ws = ws;
-                 data->connection->closed = false;
-                 data->session_id =
-                     "session_" +
-                     std::to_string(std::chrono::steady_clock::now()
-                                        .time_since_epoch()
-                                        .count());
-                 fprintf(stderr, "[INFO] Client connected: %s\n",
-                         data->session_id.c_str());
-               },
+           .open = [](auto *ws) {
+             auto *data = ws->getUserData();
+             data->connection = std::make_shared<ConnectionState>();
+             data->connection->ws = ws;
+             data->connection->closed = false;
+             data->session_id =
+                 "session_" + std::to_string(std::chrono::steady_clock::now()
+                                                 .time_since_epoch()
+                                                 .count());
+             data->pending.reset();
+             fprintf(stderr, "[INFO] Client connected: %s\n",
+                     data->session_id.c_str());
+           },
 
-           .message =
-               [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
-                 handle_message(ws, message, opCode == uWS::OpCode::BINARY);
-               },
+           .message = [this](auto *ws, std::string_view message,
+                             uWS::OpCode opCode) {
+             handle_message(ws, message, opCode == uWS::OpCode::BINARY);
+           },
 
-           .close =
-               [this](auto *ws, int code, std::string_view message) {
-                 auto *data = ws->getUserData();
-                 if (data->connection) {
-                   data->connection->closed = true;
-                   data->connection->ws = nullptr;
-                 }
-                 fprintf(stderr, "[INFO] Client disconnected: %s\n",
-                         data->session_id.c_str());
-                 sessions_.remove(data->session_id);
-               }})
-      .listen(port_,
-              [this](auto *listen_socket) {
-                if (listen_socket) {
-                  impl_->listen_socket = listen_socket;
-                  fprintf(stderr, "[INFO] WebSocket server listening on port %d\n",
-                          port_);
-                } else {
-                  fprintf(stderr, "[ERROR] Failed to listen on port %d\n",
-                          port_);
-                  running_ = false;
-                }
-              })
+           .close = [this](auto *ws, int code, std::string_view message) {
+             (void)code;
+             (void)message;
+             auto *data = ws->getUserData();
+             if (data->connection) {
+               data->connection->closed = true;
+               data->connection->ws = nullptr;
+             }
+             data->pending.reset();
+             fprintf(stderr, "[INFO] Client disconnected: %s\n",
+                     data->session_id.c_str());
+             sessions_.retire(data->session_id);
+           }})
+      .listen(port_, [this](auto *listen_socket) {
+        if (listen_socket) {
+          impl_->listen_socket = listen_socket;
+          fprintf(stderr, "[INFO] WebSocket server listening on port %d\n",
+                  port_);
+        } else {
+          fprintf(stderr, "[ERROR] Failed to listen on port %d\n", port_);
+          running_ = false;
+        }
+      })
       .run();
 
   running_ = false;
@@ -158,6 +194,197 @@ void WebSocketServer::stop() {
   }
 }
 
+void WebSocketServer::merge_defaults(json &target, const json &defaults) {
+  if (!defaults.is_object()) {
+    return;
+  }
+
+  for (auto it = defaults.begin(); it != defaults.end(); ++it) {
+    if (!target.contains(it.key())) {
+      target[it.key()] = it.value();
+    } else if (target[it.key()].is_object() && it.value().is_object()) {
+      merge_defaults(target[it.key()], it.value());
+    }
+  }
+}
+
+void WebSocketServer::clamp_number(json &obj, const char *key, double min_value,
+                                   double max_value) {
+  if (!obj.contains(key) || !obj[key].is_number()) {
+    return;
+  }
+  const double value = obj[key].get<double>();
+  obj[key] = std::clamp(value, min_value, max_value);
+}
+
+json WebSocketServer::sanitize_client_overrides(const json &request) const {
+  json sanitized = json::object();
+  if (!request.contains("config") || !request["config"].is_object()) {
+    return sanitized;
+  }
+
+  const json &cfg = request["config"];
+  const json limits = server_config_.value("limits", json::object());
+
+  if (cfg.contains("yolo") && cfg["yolo"].is_object()) {
+    json yolo = json::object();
+    const auto &src = cfg["yolo"];
+    if (src.contains("confidence") && src["confidence"].is_number()) {
+      yolo["confidence"] = src["confidence"];
+    }
+    if (src.contains("nms_threshold") && src["nms_threshold"].is_number()) {
+      yolo["nms_threshold"] = src["nms_threshold"];
+    }
+    clamp_number(yolo, "confidence", limits.value("confidence_min", 0.05),
+                 limits.value("confidence_max", 0.95));
+    clamp_number(yolo, "nms_threshold", limits.value("nms_min", 0.1),
+                 limits.value("nms_max", 0.95));
+    if (!yolo.empty()) {
+      sanitized["yolo"] = std::move(yolo);
+    }
+  }
+
+  if (cfg.contains("tracker") && cfg["tracker"].is_object()) {
+    json tracker = json::object();
+    const auto &src = cfg["tracker"];
+    for (const char *key : {"track_thresh", "high_thresh", "match_thresh"}) {
+      if (src.contains(key) && src[key].is_number()) {
+        tracker[key] = src[key];
+      }
+    }
+    for (const char *key : {"max_time_lost", "min_hits"}) {
+      if (src.contains(key) && src[key].is_number_integer()) {
+        tracker[key] = src[key];
+      }
+    }
+    clamp_number(tracker, "track_thresh",
+                 limits.value("tracker_thresh_min", 0.05),
+                 limits.value("tracker_thresh_max", 0.99));
+    clamp_number(tracker, "high_thresh",
+                 limits.value("tracker_thresh_min", 0.05),
+                 limits.value("tracker_thresh_max", 0.99));
+    clamp_number(tracker, "match_thresh",
+                 limits.value("match_thresh_min", 0.1),
+                 limits.value("match_thresh_max", 0.99));
+    if (!tracker.empty()) {
+      sanitized["tracker"] = std::move(tracker);
+    }
+  }
+
+  if (cfg.contains("undistort") && cfg["undistort"].is_object()) {
+    json undistort = json::object();
+    const auto &src = cfg["undistort"];
+    copy_array_field(src, "camera_matrix", undistort, 9);
+    copy_array_field(src, "dist_coeffs", undistort);
+    if (has_camera_params(undistort)) {
+      sanitized["undistort"] = std::move(undistort);
+    }
+  }
+
+  if (cfg.contains("geo_transform") && cfg["geo_transform"].is_object()) {
+    json geo = json::object();
+    const auto &src = cfg["geo_transform"];
+    copy_array_field(src, "homography", geo, 9);
+    if (src.contains("origin_lon") && src["origin_lon"].is_number()) {
+      geo["origin_lon"] = src["origin_lon"];
+    }
+    if (src.contains("origin_lat") && src["origin_lat"].is_number()) {
+      geo["origin_lat"] = src["origin_lat"];
+    }
+    if (src.contains("camera_matrix") && src.contains("dist_coeffs")) {
+      copy_array_field(src, "camera_matrix", geo, 9);
+      copy_array_field(src, "dist_coeffs", geo);
+    }
+    if (has_geo_params(geo)) {
+      sanitized["geo_transform"] = std::move(geo);
+    }
+  }
+
+  return sanitized;
+}
+
+std::vector<std::string> WebSocketServer::build_pipeline(const json &features,
+                                                         const json &config) const {
+  std::vector<std::string> pipeline{"decoder", "yolo"};
+
+  const bool enable_undistort =
+      features.value("undistort", false) && config.contains("undistort") &&
+      has_camera_params(config["undistort"]);
+  const bool enable_tracker = features.value("tracker", true);
+  const bool enable_geo = features.value("geo_transform", false) &&
+                          config.contains("geo_transform") &&
+                          has_geo_params(config["geo_transform"]);
+
+  if (enable_undistort) {
+    pipeline.push_back("undistort");
+  }
+  if (enable_tracker) {
+    pipeline.push_back("tracker");
+  }
+  if (enable_geo) {
+    pipeline.push_back("geo_transform");
+  }
+
+  return pipeline;
+}
+
+json WebSocketServer::build_pipeline_config(const json &request) const {
+  json effective_config = server_config_.value("defaults", json::object());
+  json features = server_config_.value("features", json::object());
+
+  if (request.contains("features") && request["features"].is_object()) {
+    const auto &src = request["features"];
+    for (const char *key : {"tracker", "undistort", "geo_transform"}) {
+      if (src.contains(key) && src[key].is_boolean()) {
+        features[key] = src[key];
+      }
+    }
+  } else if (request.contains("pipeline") && request["pipeline"].is_array()) {
+    for (const auto &item : request["pipeline"]) {
+      if (!item.is_string()) {
+        continue;
+      }
+      const auto name = item.get<std::string>();
+      if (name == "tracker") {
+        features["tracker"] = true;
+      } else if (name == "undistort") {
+        features["undistort"] = true;
+      } else if (name == "geo_transform") {
+        features["geo_transform"] = true;
+      }
+    }
+  }
+
+  json overrides = sanitize_client_overrides(request);
+  effective_config.merge_patch(overrides);
+
+  if (overrides.contains("undistort")) {
+    features["undistort"] = true;
+  }
+  if (overrides.contains("geo_transform")) {
+    features["geo_transform"] = true;
+  }
+
+  return {{"pipeline", build_pipeline(features, effective_config)},
+          {"config", effective_config}};
+}
+
+json WebSocketServer::build_error(const std::string &code,
+                                  const std::string &message,
+                                  const std::string &request_id,
+                                  const json &extra) const {
+  json response = {{"type", "error"},
+                   {"request_id", request_id},
+                   {"error", message},
+                   {"code", code}};
+  if (extra.is_object()) {
+    for (auto it = extra.begin(); it != extra.end(); ++it) {
+      response[it.key()] = it.value();
+    }
+  }
+  return response;
+}
+
 void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
                                      bool is_binary) {
   auto *ws = static_cast<WsHandle *>(ws_ptr);
@@ -169,67 +396,180 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
     sessions_.cleanup_expired(session_timeout_);
   }
 
+  const auto now = std::chrono::steady_clock::now();
+  if (socket_data->pending.has_value() &&
+      now - socket_data->pending->received_at > kPendingHeaderTimeout) {
+    const auto expired_request_id = socket_data->pending->request_id;
+    socket_data->pending.reset();
+    ws->send(build_error("header_timeout",
+                         "Timed out waiting for binary frame after infer_header",
+                         expired_request_id, json::object())
+                 .dump(),
+             uWS::OpCode::TEXT);
+  }
+
+  const json limits = server_config_.value("limits", json::object());
+  const size_t max_requests_per_session =
+      static_cast<size_t>(limits.value("max_requests_per_session", 4));
+  const size_t max_payload_bytes =
+      static_cast<size_t>(limits.value("max_payload_bytes", 100 * 1024 * 1024));
+
   if (is_binary) {
-    if (!socket_data->waiting_for_image)
+    if (!socket_data->pending.has_value()) {
+      ws->send(build_error("unexpected_binary",
+                           "Received binary image frame without infer_header",
+                           "", json::object())
+                   .dump(),
+               uWS::OpCode::TEXT);
       return;
+    }
 
-    socket_data->waiting_for_image = false;
-    json request = socket_data->pending_header;
-
-    if (message.size() > 100 * 1024 * 1024)
+    if (message.size() > max_payload_bytes) {
+      const auto request_id = socket_data->pending->request_id;
+      socket_data->pending.reset();
+      ws->send(build_error("payload_too_large", "Binary payload is too large",
+                           request_id, json::object())
+                   .dump(),
+               uWS::OpCode::TEXT);
       return;
+    }
 
-    auto image_data = std::make_shared<std::vector<uint8_t>>(
-        message.begin(), message.end());
+    json request = socket_data->pending->header;
+    socket_data->pending.reset();
+
+    auto image_data =
+        std::make_shared<std::vector<uint8_t>>(message.begin(), message.end());
 
     auto connection = socket_data->connection;
     auto default_session_id = socket_data->session_id;
-    pool_.enqueue([this, loop, request, image_data, connection,
-                   default_session_id]() {
-      json response;
-      try {
-        ProcessingContext ctx;
-        std::string request_id = request.value("request_id", "");
-        ctx.request_id = request_id;
-        ctx.session_id = request.value("session_id", default_session_id);
-        ctx.frame_id = request.value("frame_id", 0);
-        ctx.set("image_binary", image_data);
+    const auto request_id = request.value("request_id", "");
 
-        json pipeline_config;
-        if (!request.contains("pipeline")) {
-          pipeline_config = {{"pipeline", {"decoder", "yolo", "tracker"}},
-                             {"config", request.value("config", json::object())}};
-        } else {
-          pipeline_config = request;
-        }
+    auto task = pool_.try_enqueue(
+        [this, loop, request, image_data, connection, default_session_id]() {
+          json response;
+          std::shared_ptr<Session> session;
+          try {
+            ProcessingContext ctx;
+            ctx.request_id = request.value("request_id", "");
+            ctx.session_id = request.value("session_id", default_session_id);
+            ctx.frame_id = request.value("frame_id", 0);
+            ctx.set("image_binary", image_data);
 
-        auto &session = sessions_.get_or_create(ctx.session_id, pipeline_config);
-        bool success = execute_default_pipeline(session, ctx);
-        response = build_response(ctx, success);
+            json pipeline_config = build_pipeline_config(request);
+            session = sessions_.get_or_create(ctx.session_id, pipeline_config);
+            if (!session->try_acquire_request_slot(
+                    server_config_.value("limits", json::object())
+                        .value("max_requests_per_session", 4))) {
+              response = build_error(
+                  "session_busy", "Too many outstanding requests for session",
+                  ctx.request_id, {{"session_id", ctx.session_id}});
+              defer_send_text(loop, connection, std::move(response));
+              return;
+            }
 
-      } catch (const std::exception &e) {
-        response = build_error(e.what());
-      }
+            struct SessionLease {
+              std::shared_ptr<Session> session;
+              ~SessionLease() {
+                if (session) {
+                  session->release_request_slot();
+                }
+              }
+            } lease{session};
 
-      defer_send_text(loop, connection, std::move(response));
-    });
+            if (session->is_retired()) {
+              response = build_error("stale_session", "Session was reset",
+                                     ctx.request_id,
+                                     {{"session_id", ctx.session_id}});
+            } else {
+              bool success = execute_default_pipeline(*session, ctx);
+              if (session->is_retired()) {
+                response = build_error(
+                    "stale_session", "Session was reset during processing",
+                    ctx.request_id, {{"session_id", ctx.session_id}});
+              } else {
+                response = build_response(ctx, success);
+              }
+            }
+          } catch (const std::exception &e) {
+            response = build_error("internal_error", e.what(),
+                                   request.value("request_id", ""),
+                                   json::object());
+          }
+
+          defer_send_text(loop, connection, std::move(response));
+        });
+
+    if (!task.has_value()) {
+      defer_send_text(loop, connection,
+                      build_error("queue_full", "Server is busy, try again",
+                                  request_id, json::object()));
+    }
     return;
   }
 
   try {
     json request = json::parse(message);
+    if (!request.is_object()) {
+      ws->send(build_error("invalid_request", "Request must be a JSON object",
+                           "", json::object())
+                   .dump(),
+               uWS::OpCode::TEXT);
+      return;
+    }
+
     std::string request_type = request.value("type", "");
 
     if (request_type == "infer_header") {
+      const auto request_id = request.value("request_id", "");
+      const int frame_id = request.value("frame_id", 0);
+
+      if (request_id.empty()) {
+        ws->send(build_error("invalid_request", "infer_header requires request_id",
+                             "", json::object())
+                     .dump(),
+                 uWS::OpCode::TEXT);
+        return;
+      }
+      if (frame_id <= 0) {
+        ws->send(build_error("invalid_request", "infer_header requires frame_id > 0",
+                             request_id, json::object())
+                     .dump(),
+                 uWS::OpCode::TEXT);
+        return;
+      }
+      if (request.contains("config") && !request["config"].is_object()) {
+        ws->send(build_error("invalid_request", "config must be a JSON object",
+                             request_id, json::object())
+                     .dump(),
+                 uWS::OpCode::TEXT);
+        return;
+      }
+      if (request.contains("features") && !request["features"].is_object()) {
+        ws->send(build_error("invalid_request", "features must be a JSON object",
+                             request_id, json::object())
+                     .dump(),
+                 uWS::OpCode::TEXT);
+        return;
+      }
+
+      if (socket_data->pending.has_value()) {
+        ws->send(build_error("previous_header_unpaired",
+                             "Previous infer_header has not received its binary frame",
+                             request_id, json::object())
+                     .dump(),
+                 uWS::OpCode::TEXT);
+        return;
+      }
+
       socket_data->session_id =
           request.value("session_id", socket_data->session_id);
-      socket_data->pending_header = request;
-      socket_data->waiting_for_image = true;
+      socket_data->pending = PendingRequest{request, request_id, now};
       return;
     }
 
     if (request_type == "ping") {
-      json pong = {{"type", "pong"}, {"request_id", request.value("request_id", "")}};
+      json pong = {{"type", "pong"},
+                   {"request_id", request.value("request_id", "")}};
       ws->send(pong.dump(), uWS::OpCode::TEXT);
       return;
     }
@@ -238,38 +578,42 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
       std::string rid = request.value("request_id", "");
       std::string sid = request.value("session_id", socket_data->session_id);
       socket_data->session_id = sid;
-      sessions_.remove(sid);
-      json response = {{"type", "reset_ack"}, {"request_id", rid}, {"session_id", sid}};
+      socket_data->pending.reset();
+      sessions_.retire(sid);
+      json response = {{"type", "reset_ack"},
+                       {"request_id", rid},
+                       {"session_id", sid}};
       ws->send(response.dump(), uWS::OpCode::TEXT);
       return;
     }
 
     if (request_type == "infer") {
       ws->send(build_error(
-                   "Legacy JSON infer is no longer supported. "
-                   "Use infer_header followed by a binary image frame.",
-                   request.value("request_id", ""))
+                   "legacy_infer_removed",
+                   "Legacy JSON infer is no longer supported. Use infer_header followed by a binary image frame.",
+                   request.value("request_id", ""), json::object())
                    .dump(),
                uWS::OpCode::TEXT);
       return;
     }
 
     if (request_type.empty()) {
-      ws->send(build_error("Missing type in request",
-                           request.value("request_id", ""))
+      ws->send(build_error("invalid_request", "Missing type in request",
+                           request.value("request_id", ""), json::object())
                    .dump(),
                uWS::OpCode::TEXT);
       return;
     }
 
-    ws->send(build_error("Unknown type: " + request_type,
-                         request.value("request_id", ""))
+    ws->send(build_error("unknown_type", "Unknown type: " + request_type,
+                         request.value("request_id", ""), json::object())
                  .dump(),
              uWS::OpCode::TEXT);
     return;
 
   } catch (const std::exception &e) {
-    json err = build_error("Invalid JSON: " + std::string(e.what()));
+    json err = build_error("invalid_json", "Invalid JSON: " + std::string(e.what()),
+                           "", json::object());
     ws->send(err.dump(), uWS::OpCode::TEXT);
   }
 }
@@ -297,13 +641,19 @@ json WebSocketServer::build_response(const ProcessingContext &ctx, bool success)
     det_json["confidence"] = det.confidence;
     det_json["angle"] = det.obb.angle;
 
-    cv::Point2f pts[4];
-    det.obb.points(pts);
-    det_json["obb"] = {pts[0].x, pts[0].y, pts[1].x, pts[1].y,
-                       pts[2].x, pts[2].y, pts[3].x, pts[3].y};
-
-    cv::Rect rect = det.obb.boundingRect();
-    det_json["bbox"] = {rect.x, rect.y, rect.width, rect.height};
+    if (det.geometry_ready) {
+      det_json["obb"] = {det.obb_points[0], det.obb_points[1], det.obb_points[2],
+                          det.obb_points[3], det.obb_points[4], det.obb_points[5],
+                          det.obb_points[6], det.obb_points[7]};
+      det_json["bbox"] = {det.bbox[0], det.bbox[1], det.bbox[2], det.bbox[3]};
+    } else {
+      cv::Point2f pts[4];
+      det.obb.points(pts);
+      det_json["obb"] = {pts[0].x, pts[0].y, pts[1].x, pts[1].y,
+                         pts[2].x, pts[2].y, pts[3].x, pts[3].y};
+      cv::Rect rect = det.obb.boundingRect();
+      det_json["bbox"] = {rect.x, rect.y, rect.width, rect.height};
+    }
 
     if (det.ground_x.has_value())
       det_json["ground_x"] = det.ground_x.value();

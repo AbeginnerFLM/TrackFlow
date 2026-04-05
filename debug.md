@@ -202,16 +202,17 @@
 2. **无 ping 心跳**: 前端没有周期性 ping 保活。链路经过 Cloudflare Tunnel（空闲超时 ~100s），前端停发帧后 Cloudflare 判定连接空闲并断开。
 3. **服务端 idleTimeout=120**: 若 Cloudflare 未先断，服务端 120s 无数据也会主动关闭。
 4. **静默丢帧**: `ws_server.cpp:170` 在 `waiting_for_image=false` 时丢弃 binary 数据且不报错，前端 inflight slot 无法释放。
-**解决** (待实施):
+**解决**:
 - 前端增加 inflight 超时（15s 无响应自动清除 slot）。
-- 前端增加 ping 心跳（每 30s），防止 Cloudflare/服务端判定空闲。
+- 前端增加 ping 心跳（每 30s），防止链路判定空闲。
 - 前端增加自动重连机制。
+- 服务端对 unexpected binary / duplicate header 返回显式错误，不再静默丢弃。
 
 ## 20. 前端轨迹渲染 bug
 **问题**: 车辆轨迹显示异常——长度不受用户设置控制，且轨迹断线后无法恢复。
 **原因**:
-1. **硬编码缓冲区**: `test_v5.html:647` 使用硬编码 `500` 点作为缓冲上限，忽略用户设置的 `trajLength` 变量。
-2. **间隙绘制 bug**: `test_v5.html:712` 检测到帧间隙 (`gap>3`) 时执行 `moveTo` + `continue`，跳过了 `lineTo`，导致断线后下一个有效点也不会被连接。
-**解决** (待实施):
-- 将硬编码 `500` 替换为 `trajLength`。
-- 间隙检测后移除 `continue`，改为 `moveTo` 后继续循环让后续点正常 `lineTo`。
+1. **硬编码缓冲区**: 旧版前端使用硬编码轨迹上限，忽略用户设置的 `trajLength` 变量。
+2. **间隙绘制 bug**: 检测到帧间隙 (`gap>3`) 时执行 `moveTo` 后直接跳过本次连接，导致断线后恢复不自然。
+**解决**:
+- 模块化前端中统一按 `trajLength` 裁剪轨迹。
+- 间隙检测后仍允许后续点继续连线，避免“断了之后永远不接回去”的问题。

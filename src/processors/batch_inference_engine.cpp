@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 #include <onnxruntime_cxx_api.h>
+#include <stdexcept>
 
 namespace yolo_edge {
 
@@ -27,7 +28,8 @@ BatchInferenceEngine::~BatchInferenceEngine() { shutdown(); }
 
 void BatchInferenceEngine::init(const std::string &model_path, int input_h,
                                 int input_w, bool use_cuda,
-                                int max_batch_size, int max_wait_ms) {
+                                int max_batch_size, int max_wait_ms,
+                                int max_pending, int ort_threads) {
   if (initialized_)
     return;
 
@@ -35,12 +37,14 @@ void BatchInferenceEngine::init(const std::string &model_path, int input_h,
   input_w_ = input_w;
   max_batch_size_ = max_batch_size;
   max_wait_ms_ = max_wait_ms;
+  max_pending_ = max_pending;
+  ort_threads_ = ort_threads;
 
   ort_ = std::make_unique<OrtData>();
 
   try {
     Ort::SessionOptions opts;
-    opts.SetIntraOpNumThreads(4);
+    opts.SetIntraOpNumThreads(ort_threads_);
     opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
     bool cuda_ok = false;
@@ -80,7 +84,6 @@ void BatchInferenceEngine::init(const std::string &model_path, int input_h,
       ort_->output_names.push_back(ort_->output_names_storage.back().c_str());
     }
 
-    // Warmup with batch=1
     if (cuda_ok) {
       fprintf(stderr, "[INFO] BatchEngine: Warming up CUDA...\n");
       size_t sz = 1 * 3 * input_h_ * input_w_;
@@ -96,9 +99,9 @@ void BatchInferenceEngine::init(const std::string &model_path, int input_h,
     }
 
     fprintf(stderr,
-            "[INFO] BatchEngine: Ready (model=%s, %s, batch_max=%d, wait=%dms)\n",
+            "[INFO] BatchEngine: Ready (model=%s, %s, batch_max=%d, wait=%dms, pending_max=%d, ort_threads=%d)\n",
             model_path.c_str(), cuda_ok ? "GPU" : "CPU", max_batch_size_,
-            max_wait_ms_);
+            max_wait_ms_, max_pending_, ort_threads_);
 
     running_ = true;
     initialized_ = true;
@@ -112,16 +115,36 @@ void BatchInferenceEngine::init(const std::string &model_path, int input_h,
 
 std::future<BatchInferenceEngine::InferResult>
 BatchInferenceEngine::submit(InferRequest req) {
+  auto future = try_submit(std::move(req));
+  if (!future.has_value()) {
+    throw std::runtime_error("BatchInferenceEngine queue is full");
+  }
+  return std::move(*future);
+}
+
+std::optional<std::future<BatchInferenceEngine::InferResult>>
+BatchInferenceEngine::try_submit(InferRequest req) {
   std::promise<InferResult> promise;
   auto future = promise.get_future();
 
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (!running_) {
+      return std::nullopt;
+    }
+    if (max_pending_ > 0 && static_cast<int>(queue_.size()) >= max_pending_) {
+      return std::nullopt;
+    }
     queue_.push({std::move(req), std::move(promise)});
   }
   queue_cv_.notify_one();
 
-  return future;
+  return std::optional<std::future<InferResult>>(std::move(future));
+}
+
+size_t BatchInferenceEngine::pending() const {
+  std::lock_guard<std::mutex> lock(queue_mutex_);
+  return queue_.size();
 }
 
 void BatchInferenceEngine::shutdown() {
@@ -186,7 +209,6 @@ void BatchInferenceEngine::worker_loop() {
     }
   }
 
-  // Drain 剩余
   std::lock_guard<std::mutex> lock(queue_mutex_);
   while (!queue_.empty()) {
     auto &item = queue_.front();
@@ -206,7 +228,6 @@ void BatchInferenceEngine::run_batch(
   size_t total = batch_size * per_image;
 
   try {
-    // 关键点：按 NCHW 连续内存拼成一块大 Tensor，可避免多次 ORT 调用。
     std::vector<float> batch_data(total);
     for (int b = 0; b < batch_size; ++b) {
       const float *src = requests[b].blob.ptr<float>();
@@ -284,7 +305,6 @@ void BatchInferenceEngine::run_batch(
   } catch (const std::exception &e) {
     fprintf(stderr, "[ERROR] BatchEngine: Inference failed (batch=%d): %s\n",
             batch_size, e.what());
-    // 难点：批量失败时逐帧兜底，避免把整批请求全部判死。
     for (int b = 0; b < batch_size; ++b) {
       try {
         size_t sz = per_image;
@@ -302,12 +322,12 @@ void BatchInferenceEngine::run_batch(
         if (!outs.empty()) {
           auto *d = outs[0].GetTensorMutableData<float>();
           auto s = outs[0].GetTensorTypeAndShapeInfo().GetShape();
-          size_t total = 1;
+          size_t total_out = 1;
           for (auto x : s)
-            total *= x;
+            total_out *= x;
 
           InferResult result;
-          result.data.assign(d, d + total);
+          result.data.assign(d, d + total_out);
           result.shape = s;
           result.success = true;
           promises[b].set_value(std::move(result));

@@ -2,6 +2,7 @@
 
 #include "processor_factory.hpp"
 #include "processing_pipeline.hpp"
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -31,15 +32,44 @@ public:
     return (now - last_active) > timeout;
   }
 
-  mutable std::mutex pipeline_mutex;
+  bool try_acquire_request_slot(size_t max_outstanding) {
+    if (max_outstanding == 0) {
+      active_requests_.fetch_add(1, std::memory_order_relaxed);
+      return true;
+    }
+
+    size_t current = active_requests_.load(std::memory_order_relaxed);
+    while (true) {
+      if (current >= max_outstanding) {
+        return false;
+      }
+      if (active_requests_.compare_exchange_weak(
+              current, current + 1, std::memory_order_relaxed,
+              std::memory_order_relaxed)) {
+        return true;
+      }
+    }
+  }
+
+  void release_request_slot() {
+    active_requests_.fetch_sub(1, std::memory_order_relaxed);
+  }
+
+  size_t active_requests() const {
+    return active_requests_.load(std::memory_order_relaxed);
+  }
+
+  void retire() { retired_.store(true, std::memory_order_relaxed); }
+  bool is_retired() const {
+    return retired_.load(std::memory_order_relaxed);
+  }
+
   mutable std::mutex tracker_mutex;
   std::condition_variable tracker_cv;
   int next_tracker_frame = 1;
 
   void wait_for_turn(int frame_id) {
     std::unique_lock<std::mutex> lock(tracker_mutex);
-    // 关键点：客户端重启后 frame_id 可能从 1 重新开始，这里只在“明确重启”时回卷窗口，
-    // 避免乱序旧帧把 next_tracker_frame 拉回去导致追踪顺序被破坏。
     if (frame_id == 1 && next_tracker_frame > 1) {
       next_tracker_frame = frame_id;
       tracker_cv.notify_all();
@@ -54,11 +84,16 @@ public:
     }
     tracker_cv.notify_all();
   }
+
+private:
+  std::atomic<size_t> active_requests_{0};
+  std::atomic<bool> retired_{false};
 };
 
 class SessionManager {
 public:
-  Session &get_or_create(const std::string &session_id, const json &config) {
+  std::shared_ptr<Session> get_or_create(const std::string &session_id,
+                                         const json &config) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (++access_count_ % 100 == 0) {
@@ -67,8 +102,13 @@ public:
 
     auto it = sessions_.find(session_id);
     if (it != sessions_.end()) {
-      it->second->touch();
-      return *it->second;
+      if (it->second->config != config) {
+        it->second->retire();
+        sessions_.erase(it);
+      } else {
+        it->second->touch();
+        return it->second;
+      }
     }
 
     auto pipeline = ProcessorFactory::instance().create_pipeline(config);
@@ -77,24 +117,30 @@ public:
     sessions_.emplace(session_id, session);
 
     fprintf(stderr, "[INFO] Created new session: %s\n", session_id.c_str());
-    return *session;
+    return session;
   }
 
-  Session *get(const std::string &session_id) {
+  std::shared_ptr<Session> get(const std::string &session_id) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto it = sessions_.find(session_id);
     if (it != sessions_.end()) {
       it->second->touch();
-      return it->second.get();
+      return it->second;
     }
     return nullptr;
   }
 
-  void remove(const std::string &session_id) {
+  void retire(const std::string &session_id) {
     std::lock_guard<std::mutex> lock(mutex_);
-    sessions_.erase(session_id);
-    fprintf(stderr, "[INFO] Removed session: %s\n", session_id.c_str());
+    auto it = sessions_.find(session_id);
+    if (it == sessions_.end()) {
+      return;
+    }
+
+    it->second->retire();
+    sessions_.erase(it);
+    fprintf(stderr, "[INFO] Retired session: %s\n", session_id.c_str());
   }
 
   size_t cleanup_expired(std::chrono::seconds timeout) {
@@ -111,7 +157,9 @@ private:
   size_t cleanup_expired_unlocked(std::chrono::seconds timeout) {
     size_t removed = 0;
     for (auto it = sessions_.begin(); it != sessions_.end();) {
-      if (it->second->is_expired(timeout)) {
+      const auto &session = it->second;
+      if (session->active_requests() == 0 && session->is_expired(timeout)) {
+        session->retire();
         fprintf(stderr, "[INFO] Session expired: %s\n", it->first.c_str());
         it = sessions_.erase(it);
         ++removed;

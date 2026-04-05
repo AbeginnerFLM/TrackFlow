@@ -2,6 +2,7 @@
 
 #include <opencv2/core.hpp>
 #include <any>
+#include <array>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -16,11 +17,25 @@ struct Detection {
   std::string class_name;
   float confidence = 0.0f;
   cv::RotatedRect obb;
+  std::array<float, 8> obb_points{};
+  std::array<int, 4> bbox{};
+  bool geometry_ready = false;
 
   std::optional<double> lon;
   std::optional<double> lat;
   std::optional<double> ground_x;
   std::optional<double> ground_y;
+
+  void refresh_geometry() {
+    cv::Point2f pts[4];
+    obb.points(pts);
+    obb_points = {pts[0].x, pts[0].y, pts[1].x, pts[1].y,
+                  pts[2].x, pts[2].y, pts[3].x, pts[3].y};
+
+    cv::Rect rect = obb.boundingRect();
+    bbox = {rect.x, rect.y, rect.width, rect.height};
+    geometry_ready = true;
+  }
 };
 
 class ProcessingContext {

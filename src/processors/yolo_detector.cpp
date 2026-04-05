@@ -2,10 +2,12 @@
 #include "core/processor_factory.hpp"
 #include "processors/batch_inference_engine.hpp"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
 #include <onnxruntime_cxx_api.h>
 #include <opencv2/dnn.hpp>
@@ -16,6 +18,60 @@ namespace yolo_edge {
 std::vector<int> rotated_nms(const std::vector<cv::RotatedRect> &boxes,
                              const std::vector<float> &scores,
                              float nms_threshold);
+
+namespace {
+
+std::vector<std::string> default_class_names() {
+  return {"car",     "truck",  "bus",           "motorcycle",
+          "bicycle", "person", "traffic_light", "stop_sign"};
+}
+
+std::vector<std::string> parse_class_names_from_string(const std::string &raw) {
+  if (raw.empty()) {
+    return {};
+  }
+
+  // 支持 YAML 简易解析器把 `["a","b"]` 读成字符串的情况。
+  try {
+    json parsed = json::parse(raw);
+    if (parsed.is_array()) {
+      return parsed.get<std::vector<std::string>>();
+    }
+  } catch (...) {
+    // Ignore and fallback to CSV-like parsing below.
+  }
+
+  std::vector<std::string> result;
+  std::stringstream ss(raw);
+  std::string token;
+  while (std::getline(ss, token, ',')) {
+    auto trim = [](std::string &s) {
+      while (!s.empty() &&
+             std::isspace(static_cast<unsigned char>(s.front()))) {
+        s.erase(s.begin());
+      }
+      while (!s.empty() &&
+             std::isspace(static_cast<unsigned char>(s.back()))) {
+        s.pop_back();
+      }
+    };
+
+    trim(token);
+    if (token.size() >= 2 &&
+        ((token.front() == '"' && token.back() == '"') ||
+         (token.front() == '\'' && token.back() == '\''))) {
+      token = token.substr(1, token.size() - 2);
+    }
+    trim(token);
+    if (!token.empty()) {
+      result.push_back(token);
+    }
+  }
+
+  return result;
+}
+
+} // anonymous namespace
 
 struct YoloDetector::OrtSession {
   Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "YoloDetector"};
@@ -42,6 +98,10 @@ void YoloDetector::configure(const json &config) {
   is_obb_ = config.value("is_obb", true);
   input_width_ = config.value("input_width", 640);
   input_height_ = config.value("input_height", 640);
+  ort_threads_ = config.value("ort_threads", 4);
+  batch_size_ = config.value("batch_size", 4);
+  batch_wait_ms_ = config.value("batch_wait_ms", 8);
+  batch_max_pending_ = config.value("batch_max_pending", 16);
 
   if (config.contains("use_cuda")) {
     use_cuda_ = config["use_cuda"].get<bool>();
@@ -49,11 +109,30 @@ void YoloDetector::configure(const json &config) {
     use_cuda_ = true;
   }
 
+  class_names_ = default_class_names();
   if (config.contains("class_names")) {
-    class_names_ = config["class_names"].get<std::vector<std::string>>();
-  } else {
-    class_names_ = {"car",     "truck",  "bus",           "motorcycle",
-                    "bicycle", "person", "traffic_light", "stop_sign"};
+    try {
+      const auto &raw_names = config["class_names"];
+      if (raw_names.is_array()) {
+        class_names_ = raw_names.get<std::vector<std::string>>();
+      } else if (raw_names.is_string()) {
+        auto parsed = parse_class_names_from_string(raw_names.get<std::string>());
+        if (!parsed.empty()) {
+          class_names_ = std::move(parsed);
+        } else {
+          fprintf(stderr,
+                  "[WARN] class_names is string but cannot be parsed, using defaults\n");
+        }
+      } else {
+        fprintf(stderr,
+                "[WARN] class_names has invalid type, using defaults\n");
+      }
+    } catch (const std::exception &e) {
+      fprintf(stderr,
+              "[WARN] Failed to parse class_names: %s, using defaults\n",
+              e.what());
+      class_names_ = default_class_names();
+    }
   }
 
   load_model();
@@ -62,7 +141,7 @@ void YoloDetector::configure(const json &config) {
 void YoloDetector::load_model() {
   try {
     Ort::SessionOptions session_options;
-    session_options.SetIntraOpNumThreads(4);
+    session_options.SetIntraOpNumThreads(ort_threads_);
     session_options.SetGraphOptimizationLevel(
         GraphOptimizationLevel::ORT_ENABLE_ALL);
 
@@ -122,7 +201,8 @@ void YoloDetector::load_model() {
     auto &batch_engine = BatchInferenceEngine::instance();
     if (!batch_engine.is_initialized()) {
       batch_engine.init(model_path_, input_height_, input_width_, use_cuda_,
-                        /*max_batch_size=*/4, /*max_wait_ms=*/8);
+                        batch_size_, batch_wait_ms_, batch_max_pending_,
+                        ort_threads_);
     }
 
     if (batch_engine.is_initialized()) {
@@ -230,19 +310,25 @@ YoloDetector::infer(const cv::Mat &blob) {
     if (use_batch_engine_) {
       auto &engine = BatchInferenceEngine::instance();
       if (engine.is_initialized()) {
-        BatchInferenceEngine::InferRequest req;
-        req.blob = blob;
+        try {
+          BatchInferenceEngine::InferRequest req;
+          req.blob = blob;
 
-        auto future = engine.submit(std::move(req));
-        auto result = future.get();
+          auto future = engine.submit(std::move(req));
+          auto result = future.get();
 
-        if (result.success) {
-          InferOutput out;
-          out.data = std::move(result.data);
-          out.shape = std::move(result.shape);
-          return {std::move(out)};
+          if (result.success) {
+            InferOutput out;
+            out.data = std::move(result.data);
+            out.shape = std::move(result.shape);
+            return {std::move(out)};
+          }
+          fprintf(stderr, "[WARN] YoloDetector: Batch inference failed, fallback to local session\n");
+        } catch (const std::exception &e) {
+          fprintf(stderr,
+                  "[WARN] YoloDetector: Batch engine unavailable (%s), fallback to local session\n",
+                  e.what());
         }
-        fprintf(stderr, "[WARN] YoloDetector: Batch inference failed, fallback to local session\n");
       }
     }
 
@@ -430,6 +516,7 @@ YoloDetector::postprocess(const std::vector<InferOutput> &outputs,
       else
         det.class_name = "class_" + std::to_string(det.class_id);
 
+      det.refresh_geometry();
       detections.push_back(det);
     }
 

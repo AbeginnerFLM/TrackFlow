@@ -54,6 +54,10 @@ private:
   int input_height_ = 640;
   bool use_cuda_ = true;
   bool use_batch_engine_ = false;
+  int ort_threads_ = 4;
+  int batch_size_ = 4;
+  int batch_wait_ms_ = 8;
+  int batch_max_pending_ = 16;
 
   std::vector<std::string> class_names_;
 
