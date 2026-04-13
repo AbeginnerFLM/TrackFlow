@@ -70,7 +70,13 @@ bool execute_default_pipeline(Session &session, ProcessingContext &ctx) {
     return success;
   }
 
-  session.wait_for_turn(ctx.frame_id);
+  const bool tracker_turn_ready = session.wait_for_turn(ctx.frame_id);
+  if (!tracker_turn_ready) {
+    const auto end = Clock::now();
+    ctx.total_time_ms =
+        std::chrono::duration<double, std::milli>(end - start).count();
+    return success;
+  }
   try {
     if (success) {
       success = session.pipeline.execute_range(ctx, split, session.pipeline.size());

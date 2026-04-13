@@ -315,8 +315,8 @@ const cap=document.createElement('canvas'),capCx=cap.getContext('2d');
 let ws=null,streaming=false,paused=false;
 let frameId=0,scale=1,targetFps=10,videoLoaded=false;
 const MAX_INFLIGHT=6;
-const CAPTURE_MAX_WIDTH=640;
-const JPEG_QUALITY=0.35;
+const CAPTURE_MAX_WIDTH=960;
+const JPEG_QUALITY=0.5;
 const WS_BUFFER_HIGH_WATER=2*1024*1024;
 const STARTUP_BUFFER_MS=2000;
 const STARTUP_FORCE_PLAY_MS=12000;
@@ -336,8 +336,8 @@ let startupUnlockTimer=null,startupForcePlayTimer=null;
 let laneUiDirty=false,laneUiTimer=null,lastLaneUiUpdate=0;
 let vehicleUiDirty=false,vehicleUiTimer=null,lastVehicleUiUpdate=0;
 const colors=['#48f08b','#f28b82','#8ab4f8','#fdd663','#c58af9','#ff8bcb','#36d1a0','#78d9ec','#fcb75e','#a8c7fa'];
-const baseCfg={yolo:{confidence:0.1,nms_threshold:0.5,use_cuda:true},
-    tracker:{enabled:true,track_thresh:0.25,high_thresh:0.35,match_thresh:0.8,min_hits:1,max_time_lost:30}};
+const baseCfg={yolo:{confidence:0.5,nms_threshold:0.45,use_cuda:true},
+    tracker:{enabled:true,track_thresh:0.5,high_thresh:0.6,match_thresh:0.8,min_hits:3,max_time_lost:30}};
 let lastPipelineKey=''; // track pipeline changes to trigger session reset
 
 function buildPipelineConfig(){
@@ -377,6 +377,23 @@ let lanes={};          // {laneId: {name,points:[],polygon:null,visible,vehicles
 let laneCounter=0;
 let drawingLane=null;  // laneId currently being drawn
 let selectedVehicle=null;
+
+function resetRunTrackingState(){
+    vehicleTracks={};
+    selectedVehicle=null;
+    for(const lid in lanes){
+        const lane=lanes[lid];
+        lane.vehiclesInside=new Set();
+        lane.counted=new Set();
+        lane.passCount=0;
+        lane.passTimestamps=[];
+        lane.flowCount=0;
+        lane.queueCount=0;
+        lane.flowRate=0;
+    }
+    updateVehicleList();
+    renderLaneList();
+}
 
 /* ══════════════════════════════════════════
    §1  COORDINATE TRANSFORM MODULE
@@ -686,6 +703,7 @@ function fmt(s){if(!isFinite(s))return'0:00';const m=Math.floor(s/60),sc=Math.fl
 function startInfer(){
     if(!ws||ws.readyState!==1||!videoLoaded)return;
     streaming=true;paused=false;frameId=0;
+    resetRunTrackingState();
     clearStartupTimers();
     allowPlayback=false;
     firstResultReceived=false;

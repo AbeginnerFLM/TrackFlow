@@ -68,13 +68,32 @@ public:
   std::condition_variable tracker_cv;
   int next_tracker_frame = 1;
 
-  void wait_for_turn(int frame_id) {
+  bool wait_for_turn(int frame_id) {
     std::unique_lock<std::mutex> lock(tracker_mutex);
+    if (frame_id <= 0) {
+      return false;
+    }
     if (frame_id == 1 && next_tracker_frame > 1) {
       next_tracker_frame = frame_id;
       tracker_cv.notify_all();
     }
-    tracker_cv.wait(lock, [&] { return frame_id == next_tracker_frame; });
+    while (frame_id != next_tracker_frame) {
+      if (frame_id < next_tracker_frame) {
+        return false;
+      }
+      if (tracker_cv.wait_for(lock, std::chrono::milliseconds(1200)) ==
+          std::cv_status::timeout) {
+        if (frame_id > next_tracker_frame) {
+          fprintf(stderr,
+                  "[WARN] Session %s tracker gap: expected frame %d, got %d. "
+                  "Skip missing frame(s).\n",
+                  session_id.c_str(), next_tracker_frame, frame_id);
+          next_tracker_frame = frame_id;
+          break;
+        }
+      }
+    }
+    return frame_id == next_tracker_frame;
   }
 
   void advance_turn() {

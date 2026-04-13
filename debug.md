@@ -252,3 +252,19 @@
 - 将服务端并发配额提升到 8（`config/config.yaml`、`src/main.cpp` 默认值、`ws_server.cpp` fallback）；
 - 在 `ws_server.cpp` 中统一使用同一个 `max_requests_per_session` 变量做 slot 校验；
 - 将 `test_v5.html` 恢复为完整页面版本（非重定向），保持原有使用习惯。
+
+## 24. 跟踪轨迹串线 / ID 观感失效（旧运行态残留 + 阈值过松 + 丢帧卡序）
+**问题**:
+- 重新点击 Start 后，右侧车辆信息与轨迹会混入上一次推理结果；
+- 轨迹线出现“随机串联”，看起来像 ID 彻底失效；
+- 在高并发下，偶发丢帧会让 tracker 等待缺失帧，后续帧长期阻塞。
+
+**原因**:
+1. **前端运行态未在 Start 前清空**：`vehicleTracks` 与 lane 动态统计跨轮次复用，tracker 重置后 ID 从 1 重新开始，前端却把新旧同 ID 轨迹拼接在一起。
+2. **前端默认阈值被放宽过多**：`confidence=0.1 / track_thresh=0.25 / high_thresh=0.35 / min_hits=1` 引入大量低质量框，导致 ID 抖动显著。
+3. **tracker 严格按序等待但无缺帧兜底**：当某帧未进入 tracker（如排队失败/早退）时，后续帧会一直等待该帧 turn。
+
+**解决**:
+- 前端新增 `resetRunTrackingState()`，每次 `startInfer()` 前重置车辆轨迹和车道动态统计（保留车道几何配置）。
+- 前端恢复稳定参数：`CAPTURE_MAX_WIDTH=960`、`JPEG_QUALITY=0.5`、`yolo.confidence=0.5`、`nms=0.45`、`track_thresh=0.5`、`high_thresh=0.6`、`min_hits=3`。
+- 后端 `Session::wait_for_turn()` 改为返回 `bool` 并加入超时缺帧跳过机制；`execute_default_pipeline()` 在非当前 turn 时跳过 tracker 阶段，避免全链路卡死。
