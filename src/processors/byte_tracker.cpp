@@ -339,6 +339,10 @@ ByteTracker::iou_distance(const std::vector<STrack> &tracks,
 
   for (size_t i = 0; i < tracks.size(); ++i) {
     for (size_t j = 0; j < dets.size(); ++j) {
+      // Keep associations class-consistent to reduce cross-class ID switches.
+      if (tracks[i].class_id != dets[j].first.class_id) {
+        continue;
+      }
       if ((track_aabbs[i] & det_aabbs[j]).area() == 0) {
         continue;
       }

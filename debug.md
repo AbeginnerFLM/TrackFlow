@@ -283,3 +283,19 @@
   - `CAPTURE_MAX_WIDTH=640`
   - `JPEG_QUALITY=0.35`
 - 保留上一条中的跟踪稳定性修复（运行态重置、tracker 缺帧兜底），避免“降延迟=回退 bug”。
+
+## 26. 跟踪观感差（ID 抖动/杂点过多）进一步收敛
+**问题**:
+- 即便链路恢复，前端仍出现“跟踪看起来没效果”的主观观感：ID 多、轨迹杂、切换频繁。
+
+**原因**:
+1. 前端默认检测阈值偏低，保留了大量低质量框，给 tracker 引入噪声。
+2. ByteTracker 匹配阶段未做类别约束，可能发生跨类匹配导致 ID 切换（例如行人/车辆相邻场景）。
+
+**解决**:
+- 前端 `test_v5.html` 收紧默认参数：
+  - `yolo.confidence: 0.7`
+  - `tracker.track_thresh: 0.6`
+  - `tracker.high_thresh: 0.7`
+  - `tracker.min_hits: 2`
+- 后端 `byte_tracker.cpp` 在 IoU 匹配前增加类别一致性门控（class mismatch 直接不匹配），减少跨类 ID 污染。
