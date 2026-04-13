@@ -216,3 +216,16 @@
 **解决**:
 - 模块化前端中统一按 `trajLength` 裁剪轨迹。
 - 间隙检测后仍允许后续点继续连线，避免“断了之后永远不接回去”的问题。
+
+## 21. 推理报错 `json.exception.type_error.302`（`class_names` 字段类型兼容）
+**问题**: 前端开始推理后持续报错：`type must be array, but is string`。
+**原因**:
+- `YoloDetector::configure()` 会读取 `class_names`。
+- 在部分配置链路中，`class_names` 可能从数组被转换成字符串（例如 `"[\"car\",\"pedestrian\"]"` 或 `car,pedestrian`）。
+- 若直接按数组解析，会在 session 初始化阶段抛异常，导致每帧都返回 error。
+**解决**:
+- 在 `yolo_detector.cpp` 中对 `class_names` 做兼容解析：
+  - 数组：按原逻辑读取；
+  - 字符串：先尝试 JSON 数组字符串解析，失败再按 CSV 解析；
+  - 解析失败时回退到默认类别。
+- 这样可避免因配置格式差异造成推理启动失败。
