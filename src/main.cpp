@@ -44,7 +44,7 @@ yolo_edge::json build_server_config(const yolo_edge::Config &config) {
         {"max_payload_bytes", 100 * 1024 * 1024},
         {"max_pending_tasks", 32},
         {"max_pending_batches", 16},
-        {"max_requests_per_session", 4},
+        {"max_requests_per_session", 8},
         {"ort_threads", 4},
         {"batch_size", 6},
         {"batch_wait_ms", 8},

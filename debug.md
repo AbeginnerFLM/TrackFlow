@@ -240,3 +240,15 @@
   - `config/config.yaml` 的 `yolo.batch_size`。
 **备注**:
 - 推理显示层已是单窗口路径（推理时隐藏 `video`，仅显示 `canvas`），避免双画面叠加。
+
+## 23. `session_busy` 频发与 `test_v5` 页面回退
+**问题**:
+- 前端出现 `Error: Too many outstanding requests for session`；
+- `test_v5.html` 被跳转到模块化页面后，使用体验与原先 v5 不一致。
+**原因**:
+- 服务端 `limits.max_requests_per_session` 仍为 4，而前端 inflight 已提升到 6，导致并发配额不足；
+- `test_v5.html` 在上游变更中被改为重定向页，不再是原先完整页面。
+**解决**:
+- 将服务端并发配额提升到 8（`config/config.yaml`、`src/main.cpp` 默认值、`ws_server.cpp` fallback）；
+- 在 `ws_server.cpp` 中统一使用同一个 `max_requests_per_session` 变量做 slot 校验；
+- 将 `test_v5.html` 恢复为完整页面版本（非重定向），保持原有使用习惯。

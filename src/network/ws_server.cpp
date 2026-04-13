@@ -410,7 +410,7 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
 
   const json limits = server_config_.value("limits", json::object());
   const size_t max_requests_per_session =
-      static_cast<size_t>(limits.value("max_requests_per_session", 4));
+      static_cast<size_t>(limits.value("max_requests_per_session", 8));
   const size_t max_payload_bytes =
       static_cast<size_t>(limits.value("max_payload_bytes", 100 * 1024 * 1024));
 
@@ -445,7 +445,8 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
     const auto request_id = request.value("request_id", "");
 
     auto task = pool_.try_enqueue(
-        [this, loop, request, image_data, connection, default_session_id]() {
+        [this, loop, request, image_data, connection, default_session_id,
+         max_requests_per_session]() {
           json response;
           std::shared_ptr<Session> session;
           try {
@@ -457,9 +458,7 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
 
             json pipeline_config = build_pipeline_config(request);
             session = sessions_.get_or_create(ctx.session_id, pipeline_config);
-            if (!session->try_acquire_request_slot(
-                    server_config_.value("limits", json::object())
-                        .value("max_requests_per_session", 4))) {
+            if (!session->try_acquire_request_slot(max_requests_per_session)) {
               response = build_error(
                   "session_busy", "Too many outstanding requests for session",
                   ctx.request_id, {{"session_id", ctx.session_id}});
