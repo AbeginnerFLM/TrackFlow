@@ -229,3 +229,14 @@
   - 字符串：先尝试 JSON 数组字符串解析，失败再按 CSV 解析；
   - 解析失败时回退到默认类别。
 - 这样可避免因配置格式差异造成推理启动失败。
+
+## 22. 前后端 batch 调整到 6（按现网前端路径）
+**问题**: 需要验证更高并发吞吐，要求前端 inflight 和后端 batch 同步提升到 6。
+**处理**:
+- 前端主页面已迁移到 `frontend/inference.html`，实际逻辑在 `frontend/assets/js/inference/app.js`。
+- 将 `MAX_INFLIGHT` 从 4 调整为 6。
+- 将后端默认 `batch_size` 从 4 调整为 6：
+  - `src/main.cpp` 的 runtime defaults；
+  - `config/config.yaml` 的 `yolo.batch_size`。
+**备注**:
+- 推理显示层已是单窗口路径（推理时隐藏 `video`，仅显示 `canvas`），避免双画面叠加。
