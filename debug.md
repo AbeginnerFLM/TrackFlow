@@ -268,3 +268,18 @@
 - 前端新增 `resetRunTrackingState()`，每次 `startInfer()` 前重置车辆轨迹和车道动态统计（保留车道几何配置）。
 - 前端恢复稳定参数：`CAPTURE_MAX_WIDTH=960`、`JPEG_QUALITY=0.5`、`yolo.confidence=0.5`、`nms=0.45`、`track_thresh=0.5`、`high_thresh=0.6`、`min_hits=3`。
 - 后端 `Session::wait_for_turn()` 改为返回 `bool` 并加入超时缺帧跳过机制；`execute_default_pipeline()` 在非当前 turn 时跳过 tracker 阶段，避免全链路卡死。
+
+## 25. 延迟暴涨（5s+）与 FPS 掉到 1：上传负载与并发积压
+**问题**:
+- 现场观测到 `Latency ~5731ms`，前端 FPS 约 1。
+
+**原因**:
+- 前端采集参数被调高到 `CAPTURE_MAX_WIDTH=960` + `JPEG_QUALITY=0.5`，单帧上传体积显著增大；
+- 同时 `MAX_INFLIGHT=6` 会在链路/后端跟不上时持续堆积在途请求，吞吐未提升但排队时延急剧上升。
+
+**解决**:
+- 回退到低延迟档位：
+  - `MAX_INFLIGHT=4`
+  - `CAPTURE_MAX_WIDTH=640`
+  - `JPEG_QUALITY=0.35`
+- 保留上一条中的跟踪稳定性修复（运行态重置、tracker 缺帧兜底），避免“降延迟=回退 bug”。
