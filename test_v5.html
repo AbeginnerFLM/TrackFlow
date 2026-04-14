@@ -315,8 +315,8 @@ const cap=document.createElement('canvas'),capCx=cap.getContext('2d');
 let ws=null,streaming=false,paused=false;
 let frameId=0,scale=1,targetFps=10,videoLoaded=false;
 const MAX_INFLIGHT=4;
-const CAPTURE_MAX_WIDTH=960;
-const JPEG_QUALITY=0.5;
+const CAPTURE_MAX_WIDTH=1280;
+const JPEG_QUALITY=0.65;
 const WS_BUFFER_HIGH_WATER=2*1024*1024;
 const STARTUP_BUFFER_MS=2000;
 const STARTUP_FORCE_PLAY_MS=12000;
@@ -802,16 +802,18 @@ function pumpFrames(){
     captureBusy=true;
     capCx.drawImage(vid,0,0,cap.width,cap.height);
     const frameTime=captureTime;
+    const bitmapPromise=createImageBitmap(vid);
     cap.toBlob(async b=>{
         captureBusy=false;
         if(!b||!streaming||paused){
+            bitmapPromise.then(bm=>{if(bm&&typeof bm.close==='function')bm.close()});
             if(streaming&&!paused)schedulePump();
             return;
         }
         try{
             const [buf,bitmap] = await Promise.all([
                 b.arrayBuffer(),
-                createImageBitmap(vid)
+                bitmapPromise
             ]);
             if(!streaming||paused){
                 if(bitmap&&typeof bitmap.close==='function')bitmap.close();
