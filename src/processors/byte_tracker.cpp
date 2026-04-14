@@ -203,6 +203,7 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
     remain_dets_high.push_back(dets_high[idx]);
 
   std::vector<int> reactivated_lost;
+  std::vector<std::pair<int, int>> reactivated_det_assignments;
 
   if (!lost_stracks_.empty() && !remain_dets_high.empty()) {
     auto cost = iou_distance(lost_stracks_, remain_dets_high);
@@ -217,6 +218,10 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
       lost_stracks_[ti].class_id = remain_dets_high[di].first.class_id;
       reactivated_lost.push_back(ti);
       det_matched[di] = true;
+      if (lost_stracks_[ti].hits >= min_hits_) {
+        reactivated_det_assignments.push_back(
+            {remain_dets_high[di].second, lost_stracks_[ti].track_id});
+      }
     }
 
     unmatched_dets_high.clear();
@@ -254,21 +259,8 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
     lost_stracks_.erase(lost_stracks_.begin() + idx);
   }
 
-  lost_stracks_.erase(
-      std::remove_if(lost_stracks_.begin(), lost_stracks_.end(),
-                     [this](const STrack &t) {
-                       return t.time_since_update > max_time_lost_;
-                     }),
-      lost_stracks_.end());
-
-  tracked_stracks_.erase(
-      std::remove_if(tracked_stracks_.begin(), tracked_stracks_.end(),
-                     [](const STrack &t) {
-                       return t.state == TrackState::Lost ||
-                              t.state == TrackState::Removed;
-                     }),
-      tracked_stracks_.end());
-
+  // Assign track IDs to detection array BEFORE cleanup erase.
+  // The erase below compacts tracked_stracks_, invalidating all stored indices.
   for (auto &det : detections)
     det.track_id = -1;
 
@@ -285,6 +277,10 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
       detections[orig_idx].track_id = tracked_stracks_[orig_ti].track_id;
   }
 
+  for (auto &[orig_idx, tid] : reactivated_det_assignments) {
+    detections[orig_idx].track_id = tid;
+  }
+
   for (auto &track : tracked_stracks_) {
     if (track.start_frame == frame_id_ && track.hits >= min_hits_) {
       for (auto &det : detections) {
@@ -297,6 +293,22 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
       }
     }
   }
+
+  // Cleanup: now safe to erase since index-based assignment is done.
+  lost_stracks_.erase(
+      std::remove_if(lost_stracks_.begin(), lost_stracks_.end(),
+                     [this](const STrack &t) {
+                       return t.time_since_update > max_time_lost_;
+                     }),
+      lost_stracks_.end());
+
+  tracked_stracks_.erase(
+      std::remove_if(tracked_stracks_.begin(), tracked_stracks_.end(),
+                     [](const STrack &t) {
+                       return t.state == TrackState::Lost ||
+                              t.state == TrackState::Removed;
+                     }),
+      tracked_stracks_.end());
 }
 
 namespace {

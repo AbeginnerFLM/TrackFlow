@@ -12,13 +12,28 @@ models/*.pt
 
 # 压缩包
 *.tar.gz
+*.tgz
 
 # IDE
 .idea/
 .vscode/
 *.swp
+.codex
 
 # 系统文件
 .DS_Store
 Thumbs.db
-third_party/onnxruntime*
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 视频 / 媒体（太大，不进仓库）
+*.mp4
+*.avi
+*.mkv
+*.mov
+
+# 临时图片
+image.png

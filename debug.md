@@ -299,3 +299,31 @@
   - `tracker.high_thresh: 0.7`
   - `tracker.min_hits: 2`
 - 后端 `byte_tracker.cpp` 在 IoU 匹配前增加类别一致性门控（class mismatch 直接不匹配），减少跨类 ID 污染。
+
+## 27. 跟踪完全失效：ByteTracker 索引失效 + 丢失轨迹 ID 未赋值（2026-04-14）
+**问题**:
+- 经过多次优化后，部署到 GPU 服务器后跟踪功能几乎完全丧失。
+- 检测框正常出现，但 track_id 要么错乱、要么始终为 -1，轨迹无法绘制。
+
+**原因（双重 bug）**:
+
+1. **`tracked_stracks_` 索引失效（致命）**:
+   - `ByteTracker::update()` 中，`tracked_stracks_.erase(remove_if(...))` 在第 264 行移除了 Lost/Removed 状态的轨迹。
+   - 但紧接其后的 detection track_id 赋值（第 272-299 行）仍使用 erase **之前** 存储的索引（`matches_high` 中的 `ti`、`matches_low` 中通过 `unmatched_tracks_high[ti]` 间接引用的索引）。
+   - `erase` 会压缩 vector，导致这些旧索引：
+     - 指向错误的轨迹（静默数据污染，ID 错乱）。
+     - 越界访问（未定义行为 / 崩溃）。
+   - **示例**: erase 前 `[S0, S1(Lost), S2, S3(Lost), S4]`，erase 后 `[S0, S2, S4]`。此时 `matches_high` 中存储的索引 2 原本指向 S2，erase 后变成 S4。索引 3、4 则直接越界。
+
+2. **丢失轨迹重激活后 detection 未赋 track_id**:
+   - 当 `lost_stracks_` 中的轨迹被重新匹配到高置信度检测框时，匹配结果仅用于更新轨迹状态和移入 `tracked_stracks_`。
+   - 但对应的 `detections[orig_idx].track_id` 从未被赋值，始终保持 -1。
+   - 导致前端看到这些检测框"没有被跟踪"。
+
+**解决**:
+- 将 detection track_id 赋值块整体移到 `tracked_stracks_` 的 erase 操作 **之前**，此时所有索引仍然有效。
+- 在丢失轨迹匹配阶段新增 `reactivated_det_assignments` 向量，收集重激活匹配对应的 `(原始检测索引, track_id)`。
+- 在赋值块中增加对 `reactivated_det_assignments` 的遍历，补全丢失轨迹重激活的 ID 赋值。
+- 更新 `.gitignore`，排除视频文件、Python 缓存、临时文件等，防止 VPS 与 GPU 服务器之间因中间文件导致同步混乱。
+
+**关键教训**: 在 STL 容器上做 `erase(remove_if(...))` 后，所有之前存储的下标立即失效。涉及下标的操作必须在 erase 之前完成，或改用不依赖下标的方式（如 ID 查找）。
