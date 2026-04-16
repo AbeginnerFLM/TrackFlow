@@ -334,6 +334,7 @@ let latestDetections=[];
 let latestFrameId=0;
 let latestFrameBitmap=null;
 const displayQueue=[];  // buffered results for smooth playback
+let displayDraining=false;
 let pumpScheduled=false;
 let renderScheduled=false;
 let laneUiDirty=false,laneUiTimer=null,lastLaneUiUpdate=0;
@@ -623,21 +624,17 @@ function schedulePump(){
     },25);
 }
 
-let displayTimer=null;
-
-function startDisplayLoop(){
-    if(displayTimer)return;
-    const interval=Math.max(16,Math.round(1000/targetFps));
-    displayTimer=setInterval(()=>{
-        if(displayQueue.length>0){
-            applyDisplayFrame(displayQueue.shift());
-            cx.clearRect(0,0,cvs.width,cvs.height);
-            draw(latestDetections,latestFrameId);
-        }
-    },interval);
-}
-function stopDisplayLoop(){
-    if(displayTimer){clearInterval(displayTimer);displayTimer=null;}
+function drainDisplayQueue(){
+    if(displayQueue.length===0){displayDraining=false;return;}
+    displayDraining=true;
+    applyDisplayFrame(displayQueue.shift());
+    cx.clearRect(0,0,cvs.width,cvs.height);
+    draw(latestDetections,latestFrameId);
+    if(displayQueue.length>0){
+        setTimeout(drainDisplayQueue,Math.max(16,Math.round(1000/targetFps)));
+    }else{
+        displayDraining=false;
+    }
 }
 
 function scheduleRender(){
@@ -741,7 +738,6 @@ function startInfer(){
     vid.style.display='none';cvs.style.display='block';
     log('Sequential processing started (batch='+BATCH_SIZE+', pipeline='+MAX_INFLIGHT+', every frame)','success');
     ws.send(JSON.stringify({type:'reset'}));
-    startDisplayLoop();
     scheduleRender();
     schedulePump();
 }
@@ -753,7 +749,7 @@ function pauseInfer(){
 function stopInfer(){
     streaming=false;paused=false;
     captureInProgress=false;
-    stopDisplayLoop();
+    displayDraining=false;
     pendingCaptures=0;
     clearInflightFrames();
     displayQueue.length=0;
@@ -867,6 +863,31 @@ function onMsg(data){
             schedulePump();
             return;
         }
+        // ── batch_result: all frames from one infer_batch arrive together ──
+        if(r.type==='batch_result'&&Array.isArray(r.results)){
+            for(const res of r.results){
+                if(res.type==='error'){
+                    if(res.request_id){
+                        const f=inflightFrames.get(res.request_id);
+                        if(f?.bitmap&&typeof f.bitmap.close==='function')f.bitmap.close();
+                        inflightFrames.delete(res.request_id);
+                    }
+                    continue;
+                }
+                const entry=inflightFrames.get(res.request_id);
+                if(!entry)continue;
+                inflightFrames.delete(res.request_id);
+                const lat=performance.now()-entry.t0;
+                const det=res.detections||[],tm=res.timing||{};
+                const currentFrameId=res.frame_id||frameId;
+                displayQueue.push({det,tm,lat,currentFrameId,
+                    captureTime:entry.captureTime||0,bitmap:entry.bitmap||null});
+            }
+            if(!displayDraining)drainDisplayQueue();
+            schedulePump();
+            return;
+        }
+        // ── Single result (legacy infer_header path) ──
         if(!r.request_id)return;
         const entry=inflightFrames.get(r.request_id);
         if(!entry)return;
@@ -874,10 +895,9 @@ function onMsg(data){
         const lat=performance.now()-entry.t0;
         const det=r.detections||[],tm=r.timing||{};
         const currentFrameId=r.frame_id||frameId;
-        // Queue the result for smooth playback instead of rendering immediately
         displayQueue.push({det,tm,lat,currentFrameId,
             captureTime:entry.captureTime||0,bitmap:entry.bitmap||null});
-        scheduleRender();
+        if(!displayDraining)drainDisplayQueue();
         schedulePump();
     }catch(e){log('Parse error: '+e.message,'error')}
 }

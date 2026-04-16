@@ -468,8 +468,19 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
       auto connection = socket_data->connection;
       auto default_session_id = socket_data->session_id;
       size_t offset = 0;
+      const size_t batch_count = batch.frames.size();
 
-      for (size_t i = 0; i < batch.frames.size(); ++i) {
+      // Shared collector: each thread stores its result; the last one sends all.
+      struct BatchCollector {
+        std::mutex mutex;
+        std::vector<json> results;
+        std::atomic<size_t> remaining;
+      };
+      auto collector = std::make_shared<BatchCollector>();
+      collector->results.resize(batch_count);
+      collector->remaining.store(batch_count);
+
+      for (size_t i = 0; i < batch_count; ++i) {
         auto image_data = std::make_shared<std::vector<uint8_t>>(
             message.begin() + offset,
             message.begin() + offset + batch.sizes[i]);
@@ -482,8 +493,8 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
         const auto request_id = frame_request.value("request_id", "");
 
         auto task = pool_.try_enqueue(
-            [this, loop, frame_request, image_data, connection,
-             default_session_id, max_requests_per_session]() {
+            [this, i, loop, frame_request, image_data, connection,
+             default_session_id, max_requests_per_session, collector]() {
               json response;
               std::shared_ptr<Session> session;
               try {
@@ -503,31 +514,30 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
                       "session_busy",
                       "Too many outstanding requests for session",
                       ctx.request_id, {{"session_id", ctx.session_id}});
-                  defer_send_text(loop, connection, std::move(response));
-                  return;
-                }
-
-                struct SessionLease {
-                  std::shared_ptr<Session> session;
-                  ~SessionLease() {
-                    if (session)
-                      session->release_request_slot();
-                  }
-                } lease{session};
-
-                if (session->is_retired()) {
-                  response = build_error("stale_session", "Session was reset",
-                                         ctx.request_id,
-                                         {{"session_id", ctx.session_id}});
                 } else {
-                  bool success = execute_default_pipeline(*session, ctx);
+                  struct SessionLease {
+                    std::shared_ptr<Session> session;
+                    ~SessionLease() {
+                      if (session)
+                        session->release_request_slot();
+                    }
+                  } lease{session};
+
                   if (session->is_retired()) {
-                    response = build_error(
-                        "stale_session",
-                        "Session was reset during processing", ctx.request_id,
-                        {{"session_id", ctx.session_id}});
+                    response =
+                        build_error("stale_session", "Session was reset",
+                                    ctx.request_id,
+                                    {{"session_id", ctx.session_id}});
                   } else {
-                    response = build_response(ctx, success);
+                    bool success = execute_default_pipeline(*session, ctx);
+                    if (session->is_retired()) {
+                      response = build_error(
+                          "stale_session",
+                          "Session was reset during processing", ctx.request_id,
+                          {{"session_id", ctx.session_id}});
+                    } else {
+                      response = build_response(ctx, success);
+                    }
                   }
                 }
               } catch (const std::exception &e) {
@@ -537,14 +547,31 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
                                 json::object());
               }
 
-              defer_send_text(loop, connection, std::move(response));
+              // Store result at its index; last thread sends the combined batch.
+              {
+                std::lock_guard<std::mutex> lock(collector->mutex);
+                collector->results[i] = std::move(response);
+              }
+              if (collector->remaining.fetch_sub(1) == 1) {
+                json batch_response = {{"type", "batch_result"},
+                                       {"results", collector->results}};
+                defer_send_text(loop, connection, std::move(batch_response));
+              }
             });
 
         if (!task.has_value()) {
-          defer_send_text(
-              loop, connection,
-              build_error("queue_full", "Server is busy, try again",
-                          request_id, json::object()));
+          // Frame couldn't be enqueued — store error and count it.
+          {
+            std::lock_guard<std::mutex> lock(collector->mutex);
+            collector->results[i] =
+                build_error("queue_full", "Server is busy, try again",
+                            request_id, json::object());
+          }
+          if (collector->remaining.fetch_sub(1) == 1) {
+            json batch_response = {{"type", "batch_result"},
+                                   {"results", collector->results}};
+            defer_send_text(loop, connection, std::move(batch_response));
+          }
         }
       }
       return;
