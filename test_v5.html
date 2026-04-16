@@ -210,8 +210,10 @@
                 </div>
             </div>
             <div class="stats">
-                <div class="st"><div class="st-v hi" id="sLat">-</div><div class="st-l">Latency</div></div>
-                <div class="st"><div class="st-v" id="sInf">-</div><div class="st-l">Infer ms</div></div>
+                <div class="st"><div class="st-v hi" id="sLat">-</div><div class="st-l">Round-trip</div></div>
+                <div class="st"><div class="st-v" id="sNet">-</div><div class="st-l">Network</div></div>
+                <div class="st"><div class="st-v" id="sBack">-</div><div class="st-l">Backend</div></div>
+                <div class="st"><div class="st-v" id="sInf">-</div><div class="st-l">Infer</div></div>
                 <div class="st"><div class="st-v" id="sFps">-</div><div class="st-l">FPS</div></div>
                 <div class="st"><div class="st-v" id="sDet">-</div><div class="st-l">Objects</div></div>
                 <div class="st"><div class="st-v" id="sFrm">0</div><div class="st-l">Frames</div></div>
@@ -721,7 +723,7 @@ function startInfer(){
     if(!ws||ws.readyState!==1||!videoLoaded)return;
     streaming=true;paused=false;frameId=0;
     resetRunTrackingState();
-    $('sLat').textContent='-';$('sInf').textContent='-';$('sFps').textContent='-';$('sDet').textContent='-';$('sFrm').textContent='0';
+    $('sLat').textContent='-';$('sNet').textContent='-';$('sBack').textContent='-';$('sInf').textContent='-';$('sFps').textContent='-';$('sDet').textContent='-';$('sFrm').textContent='0';
     targetFps=+$('fpsSel').value||videoFps;  // 0 = all frames (use video fps)
     nextFrameTime=0;
     clearInflightFrames();
@@ -889,7 +891,11 @@ function applyDisplayFrame(f){
     latestFrameBitmap=f.bitmap;
     fpsCnt++;
     const elapsed=(performance.now()-fpsT0)/1000;
+    const backendMs=f.tm.total_ms||0;
+    const networkMs=Math.max(0,f.lat-backendMs);
     $('sLat').textContent=f.lat.toFixed(0);
+    $('sNet').textContent=networkMs.toFixed(0);
+    $('sBack').textContent=backendMs.toFixed(0);
     $('sInf').textContent=(f.tm.infer_ms||0).toFixed(0);
     $('sFps').textContent=elapsed>0.5?(fpsCnt/elapsed).toFixed(1):'-';
     $('sDet').textContent=f.det.length;
