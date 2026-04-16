@@ -1,4 +1,5 @@
 #include "processors/batch_inference_engine.hpp"
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -226,6 +227,17 @@ void BatchInferenceEngine::run_batch(
   int batch_size = static_cast<int>(requests.size());
   size_t per_image = 3 * input_h_ * input_w_;
   size_t total = batch_size * per_image;
+
+  // Batch utilization logging (every 50 batches)
+  static std::atomic<int> batch_count{0};
+  static std::atomic<int> total_frames{0};
+  int cnt = batch_count.fetch_add(1, std::memory_order_relaxed) + 1;
+  total_frames.fetch_add(batch_size, std::memory_order_relaxed);
+  if (cnt % 50 == 0) {
+    float avg = static_cast<float>(total_frames.load(std::memory_order_relaxed)) / cnt;
+    fprintf(stderr, "[INFO] BatchEngine: %d batches, avg %.1f frames/batch (this batch=%d)\n",
+            cnt, avg, batch_size);
+  }
 
   try {
     std::vector<float> batch_data(total);

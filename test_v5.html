@@ -518,8 +518,10 @@ function clearLog(){$('logB').innerHTML='<div class="log-empty" id="logE">Ready<
    §3  CONNECTION
    ══════════════════════════════════════════ */
 let pingTimer=null,inflightTimer=null;
-const PING_INTERVAL=30000;    // 30s heartbeat
+const PING_INTERVAL=15000;    // 15s heartbeat (Cloudflare Tunnel friendly)
 const INFLIGHT_TIMEOUT=30000; // 30s per-request timeout
+let reconnectAttempts=0;
+const MAX_RECONNECT_ATTEMPTS=5;
 
 function toggleConn(){ws&&ws.readyState===1?ws.close():connect()}
 function connect(){
@@ -529,6 +531,7 @@ function connect(){
     ws=new WebSocket(url);
     ws.onopen=()=>{
         log('Connected','success');setConn(true);
+        reconnectAttempts=0;
         startPing();
     };
     ws.onmessage=e=>onMsg(e.data);
@@ -536,7 +539,31 @@ function connect(){
     ws.onclose=()=>{
         stopPing();
         log('Disconnected');setConn(false);
-        if(streaming)stopInfer();
+        if(streaming){
+            // Auto-reconnect during inference
+            if(reconnectAttempts<MAX_RECONNECT_ATTEMPTS){
+                reconnectAttempts++;
+                const delay=Math.min(1000*reconnectAttempts,5000);
+                log('Reconnecting in '+(delay/1000)+'s (attempt '+reconnectAttempts+')...','warn');
+                setTimeout(()=>{
+                    if(streaming){
+                        connect();
+                        // After reconnect, re-send reset and resume pumping
+                        const waitOpen=setInterval(()=>{
+                            if(ws&&ws.readyState===1){
+                                clearInterval(waitOpen);
+                                ws.send(JSON.stringify({type:'reset'}));
+                                schedulePump();
+                            }
+                        },100);
+                        setTimeout(()=>clearInterval(waitOpen),10000);
+                    }
+                },delay);
+            }else{
+                stopInfer();
+                log('Max reconnect attempts reached, inference stopped','error');
+            }
+        }
     };
 }
 function startPing(){
