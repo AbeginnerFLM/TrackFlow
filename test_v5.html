@@ -728,63 +728,74 @@ function pumpFrames(){
     if(!streaming||paused)return;
     if(!ws||ws.readyState!==1)return;
     if(ws.bufferedAmount>WS_BUFFER_HIGH_WATER){schedulePump();return;}
-    // Total in pipeline = sent-awaiting-result + still-encoding
-    if(inflightFrames.size+pendingCaptures>=MAX_INFLIGHT)return;
+    const slots=MAX_INFLIGHT-inflightFrames.size-pendingCaptures;
+    if(slots<=0)return;
     const frameDur=1/Math.max(targetFps,1);
-    const nextTime=nextFrameTime;
-    if(nextTime>=vid.duration-0.02){
+    if(nextFrameTime>=vid.duration-0.02){
         if(inflightFrames.size===0&&pendingCaptures===0){stopInfer();log('Completed all frames','success');}
         return;
     }
-    nextFrameTime=nextTime+frameDur;
-    pendingCaptures++;
-    captureFrame(nextTime);
-    // Try to fill more slots on next microtask
-    schedulePump();
+    // Determine how many frames to capture in this batch
+    const batchCount=Math.min(slots,Math.floor((vid.duration-0.02-nextFrameTime)/frameDur)+1);
+    if(batchCount<=0)return;
+    pendingCaptures+=batchCount;
+    captureBatch(nextFrameTime,batchCount,frameDur);
+    nextFrameTime+=batchCount*frameDur;
 }
-function captureFrame(seekTime){
-    vid.currentTime=seekTime;
-    const doCapture=()=>{
-        if(!streaming||paused){pendingCaptures--;schedulePump();return;}
+async function captureBatch(startTime,count,frameDur){
+    // Phase 1: Serial seek + snapshot to canvases.
+    // toBlob and createImageBitmap snapshot at call time, so we can reuse
+    // the same canvas — each call captures the current pixels independently.
+    const captures=[];
+    for(let i=0;i<count;i++){
+        if(!streaming||paused)break;
+        const t=startTime+i*frameDur;
+        vid.currentTime=t;
+        // Wait for seek to complete
+        await new Promise(r=>{
+            if(Math.abs(vid.currentTime-t)<0.005)r();
+            else vid.addEventListener('seeked',r,{once:true});
+        });
+        if(!streaming||paused)break;
         hdCapCx.drawImage(vid,0,0,hdCap.width,hdCap.height);
         capCx.drawImage(vid,0,0,cap.width,cap.height);
-        const frameTime=vid.currentTime;
-        const bitmapPromise=createImageBitmap(hdCap);
-        cap.toBlob(async b=>{
-            if(!b||!streaming||paused){
-                pendingCaptures--;
-                bitmapPromise.then(bm=>{if(bm&&typeof bm.close==='function')bm.close()});
-                schedulePump();
-                return;
-            }
-            try{
-                const [buf,bitmap]=await Promise.all([b.arrayBuffer(),bitmapPromise]);
-                if(!streaming||paused){
-                    pendingCaptures--;
-                    if(bitmap&&typeof bitmap.close==='function')bitmap.close();
-                    schedulePump();
-                    return;
-                }
-                pendingCaptures--;
-                frameId++;
-                const rid='f_'+frameId;
-                inflightFrames.set(rid,{t0:performance.now(),captureTime:frameTime,bitmap});
-                const pc=buildPipelineConfig();
-                ws.send(JSON.stringify(Object.assign({type:'infer_header',request_id:rid,frame_id:frameId},pc.header)));
-                ws.send(buf);
-                schedulePump();
-            }catch(err){
-                pendingCaptures--;
-                log('Capture failed: '+err.message,'error');
-                schedulePump();
-            }
-        },'image/jpeg',JPEG_QUALITY);
-    };
-    if(Math.abs(vid.currentTime-seekTime)<0.01){
-        doCapture();
-    }else{
-        vid.addEventListener('seeked',doCapture,{once:true});
+        captures.push({
+            time:vid.currentTime,
+            blobP:new Promise(resolve=>cap.toBlob(resolve,'image/jpeg',JPEG_QUALITY)),
+            bitmapP:createImageBitmap(hdCap)
+        });
     }
+    // Phase 2: Wait for all encodes in parallel
+    const results=await Promise.all(captures.map(async c=>{
+        const [blob,bitmap]=await Promise.all([c.blobP,c.bitmapP]);
+        return {blob,bitmap,time:c.time};
+    }));
+    // Phase 3: Burst send — all frames hit the backend within milliseconds
+    for(const r of results){
+        if(!streaming||paused||!r.blob){
+            pendingCaptures--;
+            if(r.bitmap&&typeof r.bitmap.close==='function')r.bitmap.close();
+            continue;
+        }
+        try{
+            const buf=await r.blob.arrayBuffer();
+            pendingCaptures--;
+            if(!streaming||paused){
+                if(r.bitmap&&typeof r.bitmap.close==='function')r.bitmap.close();
+                continue;
+            }
+            frameId++;
+            const rid='f_'+frameId;
+            inflightFrames.set(rid,{t0:performance.now(),captureTime:r.time,bitmap:r.bitmap});
+            const pc=buildPipelineConfig();
+            ws.send(JSON.stringify(Object.assign({type:'infer_header',request_id:rid,frame_id:frameId},pc.header)));
+            ws.send(buf);
+        }catch(err){
+            pendingCaptures--;
+            if(r.bitmap&&typeof r.bitmap.close==='function')r.bitmap.close();
+        }
+    }
+    schedulePump();
 }
 
 /* ══════════════════════════════════════════
