@@ -883,7 +883,7 @@ function onMsg(data){
                 displayQueue.push({det,tm,lat,currentFrameId,
                     captureTime:entry.captureTime||0,bitmap:entry.bitmap||null});
             }
-            if(!displayDraining)drainDisplayQueue();
+            if(!displayDraining){log('batch_result: queue='+displayQueue.length+' frames, draining at '+targetFps+'fps');drainDisplayQueue();}
             schedulePump();
             return;
         }
