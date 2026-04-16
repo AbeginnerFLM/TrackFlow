@@ -326,6 +326,7 @@ const VEHICLE_UI_UPDATE_INTERVAL=120;
 let inflightFrames=new Map();
 let nextFrameTime=0,fpsT0=0,fpsCnt=0;
 let pendingCaptures=0;
+let captureInProgress=false;  // Only one captureBatch at a time (shares vid element)
 let displayTime=0;
 let latestDetections=[];
 let latestFrameId=0;
@@ -749,6 +750,7 @@ function pauseInfer(){
 }
 function stopInfer(){
     streaming=false;paused=false;
+    captureInProgress=false;
     stopDisplayLoop();
     pendingCaptures=0;
     clearInflightFrames();
@@ -768,9 +770,8 @@ function stopInfer(){
 function pumpFrames(){
     if(!streaming||paused)return;
     if(!ws||ws.readyState!==1)return;
+    if(captureInProgress)return;  // vid element is busy — wait
     if(ws.bufferedAmount>WS_BUFFER_HIGH_WATER){schedulePump();return;}
-    // Double-buffer pipeline: send a full BATCH_SIZE when enough slots free up.
-    // While GPU processes batch A, frontend captures+sends batch B → no GPU idle.
     const slots=MAX_INFLIGHT-inflightFrames.size-pendingCaptures;
     if(slots<BATCH_SIZE)return;
     const frameDur=1/Math.max(targetFps,1);
@@ -785,6 +786,7 @@ function pumpFrames(){
     nextFrameTime+=batchCount*frameDur;
 }
 async function captureBatch(startTime,count,frameDur){
+    captureInProgress=true;
     // Phase 1: Serial seek + snapshot to canvases.
     // toBlob and createImageBitmap snapshot at call time, so we can reuse
     // the same canvas — each call captures the current pixels independently.
@@ -841,6 +843,7 @@ async function captureBatch(startTime,count,frameDur){
         for(const b of buffers){combined.set(new Uint8Array(b),off);off+=b.byteLength;}
         ws.send(combined.buffer);
     }
+    captureInProgress=false;  // Release vid element — next capture can start
     schedulePump();
 }
 
