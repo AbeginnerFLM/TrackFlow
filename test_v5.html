@@ -312,31 +312,28 @@
 const $=id=>document.getElementById(id);
 const vid=$('vid'),cvs=$('cvs'),cx=cvs.getContext('2d');
 const cap=document.createElement('canvas'),capCx=cap.getContext('2d');
+const hdCap=document.createElement('canvas'),hdCapCx=hdCap.getContext('2d');
 let ws=null,streaming=false,paused=false;
-let frameId=0,scale=1,targetFps=10,videoLoaded=false;
+let frameId=0,scale=1,targetFps=10,videoLoaded=false,videoFps=30;
 const MAX_INFLIGHT=4;
-const CAPTURE_MAX_WIDTH=1280;
-const JPEG_QUALITY=0.65;
+const CAPTURE_MAX_WIDTH=960;
+const JPEG_QUALITY=0.80;
 const WS_BUFFER_HIGH_WATER=2*1024*1024;
-const STARTUP_BUFFER_MS=2000;
-const STARTUP_FORCE_PLAY_MS=12000;
 const LANE_UI_UPDATE_INTERVAL=200;
 const VEHICLE_UI_UPDATE_INTERVAL=120;
 let inflightFrames=new Map();
 let nextFrameTime=0,fpsT0=0,fpsCnt=0;
-let captureBusy=false,lastCapturedFrameTime=-1;
-let displayTime=0,lastRenderedCaptureTime=0;
+let captureBusy=false;
+let displayTime=0;
 let latestDetections=[];
 let latestFrameId=0;
 let latestFrameBitmap=null;
 let pumpScheduled=false;
 let renderScheduled=false;
-let allowPlayback=true,firstResultReceived=false,inferStartTs=0;
-let startupUnlockTimer=null,startupForcePlayTimer=null;
 let laneUiDirty=false,laneUiTimer=null,lastLaneUiUpdate=0;
 let vehicleUiDirty=false,vehicleUiTimer=null,lastVehicleUiUpdate=0;
 const colors=['#48f08b','#f28b82','#8ab4f8','#fdd663','#c58af9','#ff8bcb','#36d1a0','#78d9ec','#fcb75e','#a8c7fa'];
-const baseCfg={yolo:{confidence:0.5,nms_threshold:0.45,use_cuda:true},
+const baseCfg={yolo:{confidence:0.1,nms_threshold:0.45,use_cuda:true},
     tracker:{enabled:true,track_thresh:0.5,high_thresh:0.6,match_thresh:0.8,min_hits:3,max_time_lost:30}};
 let lastPipelineKey=''; // track pipeline changes to trigger session reset
 
@@ -571,48 +568,10 @@ function setConn(on){
     $('btnInfer').disabled=!on||!videoLoaded;
 }
 
-function syncPlaybackState(){
-    if(streaming&&(paused||!allowPlayback)){
-        if(!vid.paused)vid.pause();
-        return;
-    }
-    if(videoLoaded&&vid.paused){
-        const p=vid.play();
-        if(p&&p.catch)p.catch(()=>{});
-    }
-}
-
 function updateTimeline(timeOverride){
     const current=Math.max(0,Math.min(timeOverride??displayTime??vid.currentTime??0,vid.duration||0));
     $('pf').style.width=(current/vid.duration*100||0)+'%';
     $('tm').textContent=fmt(current)+' / '+fmt(vid.duration);
-}
-
-function clearStartupTimers(){
-    if(startupUnlockTimer){clearTimeout(startupUnlockTimer);startupUnlockTimer=null;}
-    if(startupForcePlayTimer){clearTimeout(startupForcePlayTimer);startupForcePlayTimer=null;}
-}
-
-function tryUnlockPlayback(){
-    if(!streaming||paused||allowPlayback||!firstResultReceived)return;
-    const elapsed=performance.now()-inferStartTs;
-    const wait=Math.max(0,STARTUP_BUFFER_MS-elapsed);
-    if(wait===0){
-        allowPlayback=true;
-        syncPlaybackState();
-        schedulePump();
-        log('Warmup ready, playback resumed','success');
-        return;
-    }
-    if(startupUnlockTimer)return;
-    startupUnlockTimer=setTimeout(()=>{
-        startupUnlockTimer=null;
-        if(!streaming||paused||allowPlayback||!firstResultReceived)return;
-        allowPlayback=true;
-        syncPlaybackState();
-        schedulePump();
-        log('Warmup ready, playback resumed','success');
-    },wait);
 }
 
 function closeFrameBitmap(){
@@ -653,16 +612,11 @@ function renderFrame(){
 
 function loadVideo(f){
     if(!f)return;
-    clearStartupTimers();
-    allowPlayback=true;
-    firstResultReceived=false;
     closeFrameBitmap();
     clearInflightFrames();
     latestDetections=[];
     latestFrameId=0;
     displayTime=0;
-    lastRenderedCaptureTime=0;
-    lastCapturedFrameTime=-1;
     vid.src=URL.createObjectURL(f);
     vid.style.display='block';cvs.style.display='none';
     $('ph').style.display='none';$('tl').classList.remove('hidden');
@@ -672,6 +626,7 @@ function loadVideo(f){
         cap.height=Math.round(vid.videoHeight*s);
         scale=vid.videoWidth/cap.width;
         cvs.width=vid.videoWidth;cvs.height=vid.videoHeight;
+        hdCap.width=vid.videoWidth;hdCap.height=vid.videoHeight;
         latestDetections=[];
         latestFrameId=0;
         videoLoaded=true;
@@ -683,12 +638,7 @@ function loadVideo(f){
 }
 function onDrop(e){e.preventDefault();e.currentTarget.classList.remove('dragover');const f=e.dataTransfer?.files?.[0];if(f&&f.type.startsWith('video/'))loadVideo(f)}
 vid.addEventListener('timeupdate',()=>{
-    if(streaming){
-        scheduleRender();
-        if(allowPlayback)schedulePump();
-        updateTimeline(displayTime||vid.currentTime);
-        return;
-    }
+    if(streaming)return; // during inference we control rendering ourselves
     scheduleRender();
     updateTimeline(vid.currentTime);
 });
@@ -698,25 +648,21 @@ function ppIco(){$('ppIco').innerHTML=vid.paused?'<path d="M8 5v14l11-7z"/>':'<p
 function fmt(s){if(!isFinite(s))return'0:00';const m=Math.floor(s/60),sc=Math.floor(s%60);return m+':'+(sc<10?'0':'')+sc}
 
 /* ══════════════════════════════════════════
-   §5  INFERENCE PIPELINE
+   §5  INFERENCE PIPELINE — Sequential frame processing
+   Video stays paused. We step through frames manually.
+   Batch pipeline is always full (MAX_INFLIGHT frames in flight).
    ══════════════════════════════════════════ */
 function startInfer(){
     if(!ws||ws.readyState!==1||!videoLoaded)return;
     streaming=true;paused=false;frameId=0;
     resetRunTrackingState();
     $('sLat').textContent='-';$('sInf').textContent='-';$('sFps').textContent='-';$('sDet').textContent='-';$('sFrm').textContent='0';
-    clearStartupTimers();
-    allowPlayback=false;
-    firstResultReceived=false;
-    inferStartTs=performance.now();
     targetFps=+$('fpsSel').value;
     nextFrameTime=0;
     clearInflightFrames();
     fpsT0=performance.now();fpsCnt=0;
     captureBusy=false;
-    lastCapturedFrameTime=-1;
     displayTime=0;
-    lastRenderedCaptureTime=0;
     latestDetections=[];
     latestFrameId=0;
     closeFrameBitmap();
@@ -724,43 +670,22 @@ function startInfer(){
     $('btnInfer').classList.add('hidden');
     $('btnPause').classList.remove('hidden');$('btnStop').classList.remove('hidden');
     $('live').style.visibility='visible';
-    // During inference, render a single visual layer to avoid video/canvas
-    // desync showing up as "double windows".
     vid.style.display='none';cvs.style.display='block';
-    log('Inference started ('+targetFps+' fps, batch='+MAX_INFLIGHT+'). Warming up...','success');
-    startupForcePlayTimer=setTimeout(()=>{
-        startupForcePlayTimer=null;
-        if(!streaming||paused||allowPlayback)return;
-        allowPlayback=true;
-        syncPlaybackState();
-        schedulePump();
-        log('Warmup timed out, playback resumed','warn');
-    },STARTUP_FORCE_PLAY_MS);
+    log('Sequential processing started (batch='+MAX_INFLIGHT+', every frame)','success');
     ws.send(JSON.stringify({type:'reset'}));
-    syncPlaybackState();
     scheduleRender();
     schedulePump();
 }
 function pauseInfer(){
     paused=!paused;
     $('btnPause').textContent=paused?'Resume':'Pause';
-    if(paused){
-        vid.pause();
-        return;
-    }
-    syncPlaybackState();
-    scheduleRender();
-    schedulePump();
+    if(!paused){scheduleRender();schedulePump();}
 }
 function stopInfer(){
     streaming=false;paused=false;
-    clearStartupTimers();
-    allowPlayback=true;
-    firstResultReceived=false;
     captureBusy=false;
     clearInflightFrames();
     displayTime=0;
-    lastRenderedCaptureTime=0;
     latestDetections=[];
     latestFrameId=0;
     closeFrameBitmap();
@@ -775,65 +700,64 @@ function stopInfer(){
 function pumpFrames(){
     if(!streaming||paused||captureBusy||inflightFrames.size>=MAX_INFLIGHT)return;
     if(!ws||ws.readyState!==1)return;
-    if(!allowPlayback){
-        // Warmup stage: send a single probe frame and wait for first result.
-        if(firstResultReceived){
-            tryUnlockPlayback();
-            return;
-        }
-        if(lastCapturedFrameTime>=0||inflightFrames.size>0)return;
-    }
     const wsBuffered=ws.bufferedAmount||0;
     if(wsBuffered>WS_BUFFER_HIGH_WATER){
         schedulePump();
         return;
     }
-    if((vid.currentTime||0)>=vid.duration-0.05){
+    // Calculate next frame time based on video fps
+    const frameDur=1/Math.max(targetFps,1);
+    const nextTime=nextFrameTime;
+    if(nextTime>=vid.duration-0.02){
         if(inflightFrames.size===0){stopInfer();log('Completed all frames','success');}
         else schedulePump();
         return;
     }
-    const captureTime=Math.max(0,Math.min(vid.currentTime||0,vid.duration||0));
-    if(captureTime<=lastCapturedFrameTime+1e-3 || captureTime+1e-3<nextFrameTime){
-        schedulePump();
-        return;
-    }
-
+    // Seek video to exact frame position, then capture
     captureBusy=true;
-    capCx.drawImage(vid,0,0,cap.width,cap.height);
-    const frameTime=captureTime;
-    const bitmapPromise=createImageBitmap(vid);
-    cap.toBlob(async b=>{
-        captureBusy=false;
-        if(!b||!streaming||paused){
-            bitmapPromise.then(bm=>{if(bm&&typeof bm.close==='function')bm.close()});
-            if(streaming&&!paused)schedulePump();
-            return;
-        }
-        try{
-            const [buf,bitmap] = await Promise.all([
-                b.arrayBuffer(),
-                bitmapPromise
-            ]);
-            if(!streaming||paused){
-                if(bitmap&&typeof bitmap.close==='function')bitmap.close();
+    vid.currentTime=nextTime;
+    const onReady=()=>{
+        vid.removeEventListener('seeked',onReady);
+        if(!streaming||paused){captureBusy=false;return;}
+        // Draw to both canvases from the same paused video frame (guaranteed sync)
+        hdCapCx.drawImage(vid,0,0,hdCap.width,hdCap.height);
+        capCx.drawImage(vid,0,0,cap.width,cap.height);
+        const frameTime=vid.currentTime;
+        const bitmapPromise=createImageBitmap(hdCap); // from canvas = guaranteed sync
+        cap.toBlob(async b=>{
+            captureBusy=false;
+            if(!b||!streaming||paused){
+                bitmapPromise.then(bm=>{if(bm&&typeof bm.close==='function')bm.close()});
                 if(streaming&&!paused)schedulePump();
                 return;
             }
-            frameId++;
-            const rid='f_'+frameId;
-            inflightFrames.set(rid,{t0:performance.now(),captureTime:frameTime,bitmap});
-            const pc=buildPipelineConfig();
-            ws.send(JSON.stringify(Object.assign({type:'infer_header',request_id:rid,frame_id:frameId},pc.header)));
-            ws.send(buf);
-            lastCapturedFrameTime=frameTime;
-            nextFrameTime=frameTime+1/Math.max(targetFps,1);
-            if(streaming&&!paused)schedulePump();
-        }catch(err){
-            log('Capture failed: '+err.message,'error');
-            if(streaming&&!paused)schedulePump();
-        }
-    },'image/jpeg',JPEG_QUALITY);
+            try{
+                const [buf,bitmap]=await Promise.all([b.arrayBuffer(),bitmapPromise]);
+                if(!streaming||paused){
+                    if(bitmap&&typeof bitmap.close==='function')bitmap.close();
+                    if(streaming&&!paused)schedulePump();
+                    return;
+                }
+                frameId++;
+                const rid='f_'+frameId;
+                inflightFrames.set(rid,{t0:performance.now(),captureTime:frameTime,bitmap});
+                const pc=buildPipelineConfig();
+                ws.send(JSON.stringify(Object.assign({type:'infer_header',request_id:rid,frame_id:frameId},pc.header)));
+                ws.send(buf);
+                nextFrameTime=frameTime+frameDur;
+                if(streaming&&!paused)schedulePump();
+            }catch(err){
+                log('Capture failed: '+err.message,'error');
+                if(streaming&&!paused)schedulePump();
+            }
+        },'image/jpeg',JPEG_QUALITY);
+    };
+    // For tiny seeks the frame may already be ready
+    if(Math.abs(vid.currentTime-nextTime)<0.01){
+        onReady();
+    }else{
+        vid.addEventListener('seeked',onReady,{once:true});
+    }
 }
 
 /* ══════════════════════════════════════════
@@ -843,7 +767,7 @@ function onMsg(data){
     try{
         const r=JSON.parse(data);
         if(r.type==='pong')return;
-        if(r.type==='reset_ack'){syncPlaybackState();scheduleRender();schedulePump();return;}
+        if(r.type==='reset_ack'){scheduleRender();schedulePump();return;}
         if(r.type==='error'){
             if(r.request_id){
                 const failed=inflightFrames.get(r.request_id);
@@ -862,20 +786,9 @@ function onMsg(data){
         const lat=performance.now()-entry.t0;
         const det=r.detections||[],tm=r.timing||{};
         const currentFrameId=r.frame_id||frameId;
-        const responseTime=entry.captureTime??nextFrameTime;
-        if(responseTime+1e-4<lastRenderedCaptureTime){
-            if(entry.bitmap&&typeof entry.bitmap.close==='function')entry.bitmap.close();
-            schedulePump();
-            return;
-        }
-        lastRenderedCaptureTime=responseTime;
-        displayTime=responseTime;
+        displayTime=entry.captureTime||0;
         latestDetections=det;
         latestFrameId=currentFrameId;
-        if(!firstResultReceived){
-            firstResultReceived=true;
-            tryUnlockPlayback();
-        }
         closeFrameBitmap();
         latestFrameBitmap=entry.bitmap||null;
         fpsCnt++;
@@ -960,7 +873,7 @@ function onMsg(data){
         scheduleRender();
         scheduleVehicleUIUpdate();
         updateTimeline(displayTime);
-        if(allowPlayback)schedulePump();
+        schedulePump();
     }catch(e){log('Parse error: '+e.message,'error')}
 }
 
