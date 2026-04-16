@@ -25,9 +25,17 @@ struct PendingRequest {
   std::chrono::steady_clock::time_point received_at;
 };
 
+struct PendingBatchRequest {
+  json header;                 // full infer_batch header (config, features, etc.)
+  std::vector<json> frames;    // per-frame {request_id, frame_id}
+  std::vector<size_t> sizes;   // byte size of each JPEG in the concatenated binary
+  std::chrono::steady_clock::time_point received_at;
+};
+
 struct PerSocketData {
   std::string session_id;
   std::optional<PendingRequest> pending;
+  std::optional<PendingBatchRequest> pending_batch;
   std::shared_ptr<ConnectionState> connection;
 };
 
@@ -173,6 +181,7 @@ void WebSocketServer::run() {
                data->connection->ws = nullptr;
              }
              data->pending.reset();
+             data->pending_batch.reset();
              fprintf(stderr, "[INFO] Client disconnected: %s\n",
                      data->session_id.c_str());
              sessions_.retire(data->session_id);
@@ -413,6 +422,15 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
                  .dump(),
              uWS::OpCode::TEXT);
   }
+  if (socket_data->pending_batch.has_value() &&
+      now - socket_data->pending_batch->received_at > kPendingHeaderTimeout) {
+    socket_data->pending_batch.reset();
+    ws->send(build_error("header_timeout",
+                         "Timed out waiting for binary frame after infer_batch",
+                         "", json::object())
+                 .dump(),
+             uWS::OpCode::TEXT);
+  }
 
   const json limits = server_config_.value("limits", json::object());
   const size_t max_requests_per_session =
@@ -421,6 +439,118 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
       static_cast<size_t>(limits.value("max_payload_bytes", 100 * 1024 * 1024));
 
   if (is_binary) {
+    // ── Batch binary: split concatenated JPEGs and dispatch all at once ──
+    if (socket_data->pending_batch.has_value()) {
+      auto batch = std::move(*socket_data->pending_batch);
+      socket_data->pending_batch.reset();
+
+      if (message.size() > max_payload_bytes) {
+        ws->send(build_error("payload_too_large", "Batch binary is too large",
+                             "", json::object())
+                     .dump(),
+                 uWS::OpCode::TEXT);
+        return;
+      }
+
+      size_t expected = 0;
+      for (auto s : batch.sizes) expected += s;
+      if (message.size() != expected) {
+        ws->send(
+            build_error("payload_size_mismatch",
+                        "Batch binary size (" + std::to_string(message.size()) +
+                            ") != sum of sizes (" + std::to_string(expected) + ")",
+                        "", json::object())
+                .dump(),
+            uWS::OpCode::TEXT);
+        return;
+      }
+
+      auto connection = socket_data->connection;
+      auto default_session_id = socket_data->session_id;
+      size_t offset = 0;
+
+      for (size_t i = 0; i < batch.frames.size(); ++i) {
+        auto image_data = std::make_shared<std::vector<uint8_t>>(
+            message.begin() + offset,
+            message.begin() + offset + batch.sizes[i]);
+        offset += batch.sizes[i];
+
+        json frame_request = batch.header;
+        frame_request["request_id"] = batch.frames[i].value("request_id", "");
+        frame_request["frame_id"] = batch.frames[i].value("frame_id", 0);
+
+        const auto request_id = frame_request.value("request_id", "");
+
+        auto task = pool_.try_enqueue(
+            [this, loop, frame_request, image_data, connection,
+             default_session_id, max_requests_per_session]() {
+              json response;
+              std::shared_ptr<Session> session;
+              try {
+                ProcessingContext ctx;
+                ctx.request_id = frame_request.value("request_id", "");
+                ctx.session_id =
+                    frame_request.value("session_id", default_session_id);
+                ctx.frame_id = frame_request.value("frame_id", 0);
+                ctx.set("image_binary", image_data);
+
+                json pipeline_config = build_pipeline_config(frame_request);
+                session =
+                    sessions_.get_or_create(ctx.session_id, pipeline_config);
+                if (!session->try_acquire_request_slot(
+                        max_requests_per_session)) {
+                  response = build_error(
+                      "session_busy",
+                      "Too many outstanding requests for session",
+                      ctx.request_id, {{"session_id", ctx.session_id}});
+                  defer_send_text(loop, connection, std::move(response));
+                  return;
+                }
+
+                struct SessionLease {
+                  std::shared_ptr<Session> session;
+                  ~SessionLease() {
+                    if (session)
+                      session->release_request_slot();
+                  }
+                } lease{session};
+
+                if (session->is_retired()) {
+                  response = build_error("stale_session", "Session was reset",
+                                         ctx.request_id,
+                                         {{"session_id", ctx.session_id}});
+                } else {
+                  bool success = execute_default_pipeline(*session, ctx);
+                  if (session->is_retired()) {
+                    response = build_error(
+                        "stale_session",
+                        "Session was reset during processing", ctx.request_id,
+                        {{"session_id", ctx.session_id}});
+                  } else {
+                    response = build_response(ctx, success);
+                  }
+                }
+              } catch (const std::exception &e) {
+                response =
+                    build_error("internal_error", e.what(),
+                                frame_request.value("request_id", ""),
+                                json::object());
+              }
+
+              defer_send_text(loop, connection, std::move(response));
+            });
+
+        if (!task.has_value()) {
+          defer_send_text(
+              loop, connection,
+              build_error("queue_full", "Server is busy, try again",
+                          request_id, json::object()));
+        }
+      }
+      return;
+    }
+
+    // ── Single-frame binary (legacy infer_header + binary) ──
     if (!socket_data->pending.has_value()) {
       ws->send(build_error("unexpected_binary",
                            "Received binary image frame without infer_header",
@@ -572,6 +702,62 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
       return;
     }
 
+    if (request_type == "infer_batch") {
+      if (!request.contains("frames") || !request["frames"].is_array() ||
+          request["frames"].empty()) {
+        ws->send(build_error("invalid_request",
+                             "infer_batch requires non-empty frames array", "",
+                             json::object())
+                     .dump(),
+                 uWS::OpCode::TEXT);
+        return;
+      }
+      if (!request.contains("sizes") || !request["sizes"].is_array()) {
+        ws->send(build_error("invalid_request",
+                             "infer_batch requires sizes array", "",
+                             json::object())
+                     .dump(),
+                 uWS::OpCode::TEXT);
+        return;
+      }
+      const auto &frames = request["frames"];
+      const auto &sizes = request["sizes"];
+      if (frames.size() != sizes.size()) {
+        ws->send(build_error("invalid_request",
+                             "frames and sizes arrays must have same length", "",
+                             json::object())
+                     .dump(),
+                 uWS::OpCode::TEXT);
+        return;
+      }
+      if (socket_data->pending.has_value() ||
+          socket_data->pending_batch.has_value()) {
+        ws->send(build_error("previous_header_unpaired",
+                             "Previous header has not received its binary frame",
+                             "", json::object())
+                     .dump(),
+                 uWS::OpCode::TEXT);
+        return;
+      }
+
+      PendingBatchRequest batch;
+      batch.header = request;
+      batch.header.erase("frames");
+      batch.header.erase("sizes");
+      for (const auto &f : frames) {
+        batch.frames.push_back(f);
+      }
+      for (const auto &s : sizes) {
+        batch.sizes.push_back(s.get<size_t>());
+      }
+      batch.received_at = now;
+
+      socket_data->session_id =
+          request.value("session_id", socket_data->session_id);
+      socket_data->pending_batch = std::move(batch);
+      return;
+    }
+
     if (request_type == "ping") {
       json pong = {{"type", "pong"},
                    {"request_id", request.value("request_id", "")}};
@@ -584,6 +770,7 @@ void WebSocketServer::handle_message(void *ws_ptr, std::string_view message,
       std::string sid = request.value("session_id", socket_data->session_id);
       socket_data->session_id = sid;
       socket_data->pending.reset();
+      socket_data->pending_batch.reset();
       sessions_.retire(sid);
       json response = {{"type", "reset_ack"},
                        {"request_id", rid},

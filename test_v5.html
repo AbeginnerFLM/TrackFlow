@@ -773,9 +773,10 @@ async function captureBatch(startTime,count,frameDur){
         const buf=await blob.arrayBuffer();
         return {buf,bitmap,time:c.time};
     }));
-    // Phase 3: Burst send — ZERO awaits in this loop, all messages queued
-    // back-to-back in the WebSocket buffer before the browser flushes.
+    // Phase 3: Pack all frames into ONE infer_batch message pair.
+    // Backend receives all frames atomically → guaranteed GPU batching.
     const pc=buildPipelineConfig();
+    const frames=[],sizes=[],buffers=[];
     for(const r of encoded){
         if(!streaming||paused||!r.buf){
             pendingCaptures--;
@@ -786,8 +787,19 @@ async function captureBatch(startTime,count,frameDur){
         frameId++;
         const rid='f_'+frameId;
         inflightFrames.set(rid,{t0:performance.now(),captureTime:r.time,bitmap:r.bitmap});
-        ws.send(JSON.stringify(Object.assign({type:'infer_header',request_id:rid,frame_id:frameId},pc.header)));
-        ws.send(r.buf);
+        frames.push({request_id:rid,frame_id:frameId});
+        sizes.push(r.buf.byteLength);
+        buffers.push(r.buf);
+    }
+    if(frames.length>0){
+        // Single JSON header with all frame metadata
+        ws.send(JSON.stringify(Object.assign({type:'infer_batch',frames,sizes},pc.header)));
+        // Single binary with all JPEGs concatenated
+        const total=sizes.reduce((a,b)=>a+b,0);
+        const combined=new Uint8Array(total);
+        let off=0;
+        for(const b of buffers){combined.set(new Uint8Array(b),off);off+=b.byteLength;}
+        ws.send(combined.buffer);
     }
     schedulePump();
 }
