@@ -200,8 +200,9 @@
                     <div class="sep"></div>
                     <div class="live-dot" id="live"><span class="d"></span>LIVE</div>
                     <select class="fps-sel" id="fpsSel" title="Target FPS">
+                        <option value="0" selected>All frames</option>
                         <option value="5">5 fps</option>
-                        <option value="10" selected>10 fps</option>
+                        <option value="10">10 fps</option>
                         <option value="15">15 fps</option>
                         <option value="24">24 fps</option>
                         <option value="30">30 fps</option>
@@ -660,6 +661,19 @@ function loadVideo(f){
         latestDetections=[];
         latestFrameId=0;
         videoLoaded=true;
+        // Detect actual video frame rate via requestVideoFrameCallback
+        if('requestVideoFrameCallback' in vid){
+            let first=null;
+            vid.muted=true;vid.play();
+            const cb=(now,meta)=>{
+                if(!first){first=meta;vid.requestVideoFrameCallback(cb);return;}
+                const dt=meta.mediaTime-first.mediaTime;
+                const frames=meta.presentedFrames-first.presentedFrames;
+                if(dt>0&&frames>1){videoFps=Math.round(frames/dt);log('Detected '+videoFps+' fps');}
+                vid.pause();vid.currentTime=0;vid.muted=false;
+            };
+            vid.requestVideoFrameCallback(cb);
+        }
         scheduleRender();
         updateTimeline(0);
         setConn(ws&&ws.readyState===1);
@@ -687,7 +701,7 @@ function startInfer(){
     streaming=true;paused=false;frameId=0;
     resetRunTrackingState();
     $('sLat').textContent='-';$('sInf').textContent='-';$('sFps').textContent='-';$('sDet').textContent='-';$('sFrm').textContent='0';
-    targetFps=+$('fpsSel').value;
+    targetFps=+$('fpsSel').value||videoFps;  // 0 = all frames (use video fps)
     nextFrameTime=0;
     clearInflightFrames();
     fpsT0=performance.now();fpsCnt=0;
