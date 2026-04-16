@@ -330,6 +330,7 @@ let displayTime=0;
 let latestDetections=[];
 let latestFrameId=0;
 let latestFrameBitmap=null;
+const displayQueue=[];  // buffered results for smooth playback
 let pumpScheduled=false;
 let renderScheduled=false;
 let laneUiDirty=false,laneUiTimer=null,lastLaneUiUpdate=0;
@@ -637,14 +638,21 @@ function clearInflightFrames(){
 
 function renderFrame(){
     if(!videoLoaded)return;
+    // Drain one queued frame per rAF for smooth playback
+    if(displayQueue.length>0){
+        applyDisplayFrame(displayQueue.shift());
+    }
     cx.clearRect(0,0,cvs.width,cvs.height);
     draw(latestDetections,latestFrameId);
+    // If more frames in queue, keep draining at display refresh rate
+    if(displayQueue.length>0)scheduleRender();
 }
 
 function loadVideo(f){
     if(!f)return;
     closeFrameBitmap();
     clearInflightFrames();
+    displayQueue.length=0;
     latestDetections=[];
     latestFrameId=0;
     displayTime=0;
@@ -704,6 +712,7 @@ function startInfer(){
     targetFps=+$('fpsSel').value||videoFps;  // 0 = all frames (use video fps)
     nextFrameTime=0;
     clearInflightFrames();
+    displayQueue.length=0;
     fpsT0=performance.now();fpsCnt=0;
     pendingCaptures=0;
     displayTime=0;
@@ -729,6 +738,7 @@ function stopInfer(){
     streaming=false;paused=false;
     pendingCaptures=0;
     clearInflightFrames();
+    displayQueue.length=0;
     displayTime=0;
     latestDetections=[];
     latestFrameId=0;
@@ -835,7 +845,6 @@ function onMsg(data){
                 inflightFrames.delete(r.request_id);
             }
             log('Error: '+(r.error||'unknown'),'error');
-            scheduleRender();
             schedulePump();
             return;
         }
@@ -846,95 +855,102 @@ function onMsg(data){
         const lat=performance.now()-entry.t0;
         const det=r.detections||[],tm=r.timing||{};
         const currentFrameId=r.frame_id||frameId;
-        displayTime=entry.captureTime||0;
-        latestDetections=det;
-        latestFrameId=currentFrameId;
-        closeFrameBitmap();
-        latestFrameBitmap=entry.bitmap||null;
-        fpsCnt++;
-        const elapsed=(performance.now()-fpsT0)/1000;
-        $('sLat').textContent=lat.toFixed(0);
-        $('sInf').textContent=(tm.infer_ms||0).toFixed(0);
-        $('sFps').textContent=elapsed>0.5?(fpsCnt/elapsed).toFixed(1):'-';
-        $('sDet').textContent=det.length;
-        $('sFrm').textContent=currentFrameId;
-
-        for(const d of det){
-            if(d.track_id==null||d.track_id<0)continue;
-            const tid=d.track_id;
-            let center;
-            if(d.obb){
-                const p=d.obb;
-                center=[(p[0]+p[2]+p[4]+p[6])/4*scale,(p[1]+p[3]+p[5]+p[7])/4*scale];
-            }else if(d.bbox){
-                center=[(d.bbox[0]+d.bbox[2]/2)*scale,(d.bbox[1]+d.bbox[3]/2)*scale];
-            }else continue;
-
-            if(!vehicleTracks[tid]){
-                vehicleTracks[tid]={classId:d.class_id,className:d.class_name||('Class_'+d.class_id),
-                    positions:[],groundPositions:[],lonlatPositions:[],velocities:[],frameIds:[],lastFrame:0};
-            }
-            const tr=vehicleTracks[tid];
-            const prevFrameId=tr.frameIds.length?tr.frameIds[tr.frameIds.length-1]:null;
-            if(prevFrameId!=null&&currentFrameId<=prevFrameId)continue;
-            tr.positions.push(center);
-            tr.frameIds.push(currentFrameId);
-            tr.lastFrame=currentFrameId;
-
-            let gp=null;
-            if(d.ground_x!=null&&d.ground_y!=null){
-                gp=[d.ground_x,d.ground_y];
-            }else{
-                gp=imageToGround(center[0],center[1]);
-            }
-            tr.groundPositions.push(gp);
-            if(d.lon!=null&&d.lat!=null){
-                tr.lonlatPositions.push([d.lat,d.lon]);
-            }else if(gp){
-                const ll=groundToLatLon(gp[0],gp[1]);
-                tr.lonlatPositions.push(ll);
-            }else{
-                tr.lonlatPositions.push(null);
-            }
-
-            const n=tr.positions.length;
-            if(n>=2){
-                const prev=tr.positions[n-2],curr=tr.positions[n-1];
-                const dt=(tr.frameIds[n-1]-tr.frameIds[n-2])/targetFps;
-                if(dt>0){
-                    const dxPx=curr[0]-prev[0],dyPx=curr[1]-prev[1];
-                    const speedPx=Math.sqrt(dxPx*dxPx+dyPx*dyPx)/dt;
-                    const dir=Math.atan2(dyPx,dxPx)*180/Math.PI;
-                    let speedMs=null;
-                    const gPrev=tr.groundPositions[n-2],gCurr=tr.groundPositions[n-1];
-                    if(gPrev&&gCurr){
-                        const dgx=gCurr[0]-gPrev[0],dgy=gCurr[1]-gPrev[1];
-                        speedMs=Math.sqrt(dgx*dgx+dgy*dgy)/dt;
-                    }
-                    tr.velocities.push({speedPx,speedMs,dir});
-                }else tr.velocities.push(null);
-            }else tr.velocities.push(null);
-
-            if(laneDetectionEnabled){
-                updateLaneStats(tid,center);
-            }
-
-            if(tr.positions.length>trajLength){
-                const cut=tr.positions.length-trajLength;
-                tr.positions.splice(0,cut);
-                tr.groundPositions.splice(0,cut);
-                tr.lonlatPositions.splice(0,cut);
-                tr.velocities.splice(0,cut);
-                tr.frameIds.splice(0,cut);
-            }
-        }
-
-        if(laneDetectionEnabled)updateLaneUI();
+        // Queue the result for smooth playback instead of rendering immediately
+        displayQueue.push({det,tm,lat,currentFrameId,
+            captureTime:entry.captureTime||0,bitmap:entry.bitmap||null});
         scheduleRender();
-        scheduleVehicleUIUpdate();
-        updateTimeline(displayTime);
         schedulePump();
     }catch(e){log('Parse error: '+e.message,'error')}
+}
+
+/* Drain one queued frame per rAF for smooth visual playback */
+function applyDisplayFrame(f){
+    displayTime=f.captureTime;
+    latestDetections=f.det;
+    latestFrameId=f.currentFrameId;
+    closeFrameBitmap();
+    latestFrameBitmap=f.bitmap;
+    fpsCnt++;
+    const elapsed=(performance.now()-fpsT0)/1000;
+    $('sLat').textContent=f.lat.toFixed(0);
+    $('sInf').textContent=(f.tm.infer_ms||0).toFixed(0);
+    $('sFps').textContent=elapsed>0.5?(fpsCnt/elapsed).toFixed(1):'-';
+    $('sDet').textContent=f.det.length;
+    $('sFrm').textContent=f.currentFrameId;
+
+    for(const d of f.det){
+        if(d.track_id==null||d.track_id<0)continue;
+        const tid=d.track_id;
+        let center;
+        if(d.obb){
+            const p=d.obb;
+            center=[(p[0]+p[2]+p[4]+p[6])/4*scale,(p[1]+p[3]+p[5]+p[7])/4*scale];
+        }else if(d.bbox){
+            center=[(d.bbox[0]+d.bbox[2]/2)*scale,(d.bbox[1]+d.bbox[3]/2)*scale];
+        }else continue;
+
+        if(!vehicleTracks[tid]){
+            vehicleTracks[tid]={classId:d.class_id,className:d.class_name||('Class_'+d.class_id),
+                positions:[],groundPositions:[],lonlatPositions:[],velocities:[],frameIds:[],lastFrame:0};
+        }
+        const tr=vehicleTracks[tid];
+        const prevFrameId=tr.frameIds.length?tr.frameIds[tr.frameIds.length-1]:null;
+        if(prevFrameId!=null&&f.currentFrameId<=prevFrameId)continue;
+        tr.positions.push(center);
+        tr.frameIds.push(f.currentFrameId);
+        tr.lastFrame=f.currentFrameId;
+
+        let gp=null;
+        if(d.ground_x!=null&&d.ground_y!=null){
+            gp=[d.ground_x,d.ground_y];
+        }else{
+            gp=imageToGround(center[0],center[1]);
+        }
+        tr.groundPositions.push(gp);
+        if(d.lon!=null&&d.lat!=null){
+            tr.lonlatPositions.push([d.lat,d.lon]);
+        }else if(gp){
+            const ll=groundToLatLon(gp[0],gp[1]);
+            tr.lonlatPositions.push(ll);
+        }else{
+            tr.lonlatPositions.push(null);
+        }
+
+        const n=tr.positions.length;
+        if(n>=2){
+            const prev=tr.positions[n-2],curr=tr.positions[n-1];
+            const dt=(tr.frameIds[n-1]-tr.frameIds[n-2])/targetFps;
+            if(dt>0){
+                const dxPx=curr[0]-prev[0],dyPx=curr[1]-prev[1];
+                const speedPx=Math.sqrt(dxPx*dxPx+dyPx*dyPx)/dt;
+                const dir=Math.atan2(dyPx,dxPx)*180/Math.PI;
+                let speedMs=null;
+                const gPrev=tr.groundPositions[n-2],gCurr=tr.groundPositions[n-1];
+                if(gPrev&&gCurr){
+                    const dgx=gCurr[0]-gPrev[0],dgy=gCurr[1]-gPrev[1];
+                    speedMs=Math.sqrt(dgx*dgx+dgy*dgy)/dt;
+                }
+                tr.velocities.push({speedPx,speedMs,dir});
+            }else tr.velocities.push(null);
+        }else tr.velocities.push(null);
+
+        if(laneDetectionEnabled){
+            updateLaneStats(tid,center);
+        }
+
+        if(tr.positions.length>trajLength){
+            const cut=tr.positions.length-trajLength;
+            tr.positions.splice(0,cut);
+            tr.groundPositions.splice(0,cut);
+            tr.lonlatPositions.splice(0,cut);
+            tr.velocities.splice(0,cut);
+            tr.frameIds.splice(0,cut);
+        }
+    }
+
+    if(laneDetectionEnabled)updateLaneUI();
+    scheduleVehicleUIUpdate();
+    updateTimeline(displayTime);
 }
 
 /* ══════════════════════════════════════════
