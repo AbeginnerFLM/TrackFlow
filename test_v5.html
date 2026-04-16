@@ -620,6 +620,23 @@ function schedulePump(){
     },25);
 }
 
+let displayTimer=null;
+
+function startDisplayLoop(){
+    if(displayTimer)return;
+    const interval=Math.max(16,Math.round(1000/targetFps));
+    displayTimer=setInterval(()=>{
+        if(displayQueue.length>0){
+            applyDisplayFrame(displayQueue.shift());
+            cx.clearRect(0,0,cvs.width,cvs.height);
+            draw(latestDetections,latestFrameId);
+        }
+    },interval);
+}
+function stopDisplayLoop(){
+    if(displayTimer){clearInterval(displayTimer);displayTimer=null;}
+}
+
 function scheduleRender(){
     if(renderScheduled)return;
     renderScheduled=true;
@@ -638,14 +655,8 @@ function clearInflightFrames(){
 
 function renderFrame(){
     if(!videoLoaded)return;
-    // Drain one queued frame per rAF for smooth playback
-    if(displayQueue.length>0){
-        applyDisplayFrame(displayQueue.shift());
-    }
     cx.clearRect(0,0,cvs.width,cvs.height);
     draw(latestDetections,latestFrameId);
-    // If more frames in queue, keep draining at display refresh rate
-    if(displayQueue.length>0)scheduleRender();
 }
 
 function loadVideo(f){
@@ -671,13 +682,14 @@ function loadVideo(f){
         videoLoaded=true;
         // Detect actual video frame rate via requestVideoFrameCallback
         if('requestVideoFrameCallback' in vid){
-            let first=null;
+            let firstMeta=null,cbCount=0;
             vid.muted=true;vid.play();
             const cb=(now,meta)=>{
-                if(!first){first=meta;vid.requestVideoFrameCallback(cb);return;}
-                const dt=meta.mediaTime-first.mediaTime;
-                const frames=meta.presentedFrames-first.presentedFrames;
-                if(dt>0&&frames>1){videoFps=Math.round(frames/dt);log('Detected '+videoFps+' fps');}
+                if(!firstMeta){firstMeta=meta;cbCount=0;vid.requestVideoFrameCallback(cb);return;}
+                cbCount++;
+                if(cbCount<5){vid.requestVideoFrameCallback(cb);return;}
+                const dt=meta.mediaTime-firstMeta.mediaTime;
+                if(dt>0.01){videoFps=Math.round(cbCount/dt);log('Detected '+videoFps+' fps');}
                 vid.pause();vid.currentTime=0;vid.muted=false;
             };
             vid.requestVideoFrameCallback(cb);
@@ -726,6 +738,7 @@ function startInfer(){
     vid.style.display='none';cvs.style.display='block';
     log('Sequential processing started (batch='+BATCH_SIZE+', pipeline='+MAX_INFLIGHT+', every frame)','success');
     ws.send(JSON.stringify({type:'reset'}));
+    startDisplayLoop();
     scheduleRender();
     schedulePump();
 }
@@ -736,6 +749,7 @@ function pauseInfer(){
 }
 function stopInfer(){
     streaming=false;paused=false;
+    stopDisplayLoop();
     pendingCaptures=0;
     clearInflightFrames();
     displayQueue.length=0;
