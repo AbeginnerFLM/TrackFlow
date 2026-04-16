@@ -49,11 +49,26 @@ void STrack::predict() {
   if (!kf_initialized)
     return;
 
-  cv::Mat pred = kf.predict();
-  bbox.center.x = pred.at<float>(0);
-  bbox.center.y = pred.at<float>(1);
-  bbox.size.width = std::max(pred.at<float>(2), 1.0f);
-  bbox.size.height = std::max(pred.at<float>(3), 1.0f);
+  try {
+    cv::Mat pred = kf.predict();
+    float cx = pred.at<float>(0);
+    float cy = pred.at<float>(1);
+    float w  = pred.at<float>(2);
+    float h  = pred.at<float>(3);
+    // Guard against NaN / Inf from diverged Kalman state
+    if (!std::isfinite(cx) || !std::isfinite(cy) ||
+        !std::isfinite(w) || !std::isfinite(h)) {
+      kf_initialized = false;
+      return;
+    }
+    bbox.center.x = cx;
+    bbox.center.y = cy;
+    bbox.size.width = std::max(w, 1.0f);
+    bbox.size.height = std::max(h, 1.0f);
+  } catch (...) {
+    kf_initialized = false;
+    return;
+  }
 
   time_since_update++;
 }
@@ -68,9 +83,18 @@ void STrack::update(const cv::RotatedRect &det, int frame, float conf) {
   add_trajectory_point(det.center);
 
   if (kf_initialized) {
-    cv::Mat measurement = (cv::Mat_<float>(4, 1) << det.center.x, det.center.y,
-                           det.size.width, det.size.height);
-    kf.correct(measurement);
+    if (!std::isfinite(det.center.x) || !std::isfinite(det.center.y) ||
+        !std::isfinite(det.size.width) || !std::isfinite(det.size.height)) {
+      kf_initialized = false;
+      return;
+    }
+    try {
+      cv::Mat measurement = (cv::Mat_<float>(4, 1) << det.center.x, det.center.y,
+                             det.size.width, det.size.height);
+      kf.correct(measurement);
+    } catch (...) {
+      kf_initialized = false;
+    }
   }
 }
 
@@ -314,8 +338,20 @@ void ByteTracker::update(std::vector<Detection> &detections, int frame_id) {
 namespace {
 
 float rotated_iou(const cv::RotatedRect &a, const cv::RotatedRect &b) {
+  // Guard: skip degenerate or NaN rects to prevent OpenCV assertion failures
+  if (a.size.width < 1.0f || a.size.height < 1.0f ||
+      b.size.width < 1.0f || b.size.height < 1.0f ||
+      !std::isfinite(a.center.x) || !std::isfinite(a.center.y) ||
+      !std::isfinite(b.center.x) || !std::isfinite(b.center.y))
+    return 0.0f;
+
   std::vector<cv::Point2f> inter_pts, hull_pts;
-  int ret = cv::rotatedRectangleIntersection(a, b, inter_pts);
+  int ret;
+  try {
+    ret = cv::rotatedRectangleIntersection(a, b, inter_pts);
+  } catch (...) {
+    return 0.0f;
+  }
 
   if (ret == cv::INTERSECT_NONE || inter_pts.size() < 3)
     return 0.0f;
