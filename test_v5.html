@@ -766,34 +766,26 @@ async function captureBatch(startTime,count,frameDur){
         });
     }
     // Phase 2: Wait for all encodes in parallel
-    const results=await Promise.all(captures.map(async c=>{
+    const encoded=await Promise.all(captures.map(async c=>{
         const [blob,bitmap]=await Promise.all([c.blobP,c.bitmapP]);
-        return {blob,bitmap,time:c.time};
+        const buf=await blob.arrayBuffer();
+        return {buf,bitmap,time:c.time};
     }));
-    // Phase 3: Burst send — all frames hit the backend within milliseconds
-    for(const r of results){
-        if(!streaming||paused||!r.blob){
+    // Phase 3: Burst send — ZERO awaits in this loop, all messages queued
+    // back-to-back in the WebSocket buffer before the browser flushes.
+    const pc=buildPipelineConfig();
+    for(const r of encoded){
+        if(!streaming||paused||!r.buf){
             pendingCaptures--;
             if(r.bitmap&&typeof r.bitmap.close==='function')r.bitmap.close();
             continue;
         }
-        try{
-            const buf=await r.blob.arrayBuffer();
-            pendingCaptures--;
-            if(!streaming||paused){
-                if(r.bitmap&&typeof r.bitmap.close==='function')r.bitmap.close();
-                continue;
-            }
-            frameId++;
-            const rid='f_'+frameId;
-            inflightFrames.set(rid,{t0:performance.now(),captureTime:r.time,bitmap:r.bitmap});
-            const pc=buildPipelineConfig();
-            ws.send(JSON.stringify(Object.assign({type:'infer_header',request_id:rid,frame_id:frameId},pc.header)));
-            ws.send(buf);
-        }catch(err){
-            pendingCaptures--;
-            if(r.bitmap&&typeof r.bitmap.close==='function')r.bitmap.close();
-        }
+        pendingCaptures--;
+        frameId++;
+        const rid='f_'+frameId;
+        inflightFrames.set(rid,{t0:performance.now(),captureTime:r.time,bitmap:r.bitmap});
+        ws.send(JSON.stringify(Object.assign({type:'infer_header',request_id:rid,frame_id:frameId},pc.header)));
+        ws.send(r.buf);
     }
     schedulePump();
 }
