@@ -316,7 +316,7 @@ const hdCap=document.createElement('canvas'),hdCapCx=hdCap.getContext('2d');
 let ws=null,streaming=false,paused=false;
 let frameId=0,scale=1,targetFps=10,videoLoaded=false,videoFps=30;
 const MAX_INFLIGHT=4;
-const CAPTURE_MAX_WIDTH=960;
+const CAPTURE_MAX_WIDTH=640;
 const JPEG_QUALITY=0.80;
 const WS_BUFFER_HIGH_WATER=2*1024*1024;
 const LANE_UI_UPDATE_INTERVAL=200;
@@ -725,44 +725,47 @@ function stopInfer(){
     ppIco();log('Stopped at frame '+frameId);
 }
 function pumpFrames(){
-    if(!streaming||paused||captureBusy||inflightFrames.size>=MAX_INFLIGHT)return;
+    if(!streaming||paused)return;
     if(!ws||ws.readyState!==1)return;
     const wsBuffered=ws.bufferedAmount||0;
     if(wsBuffered>WS_BUFFER_HIGH_WATER){
         schedulePump();
         return;
     }
-    // Calculate next frame time based on video fps
-    const frameDur=1/Math.max(targetFps,1);
-    const nextTime=nextFrameTime;
-    if(nextTime>=vid.duration-0.02){
-        if(inflightFrames.size===0){stopInfer();log('Completed all frames','success');}
-        else schedulePump();
-        return;
+    // Fire as many captures as we have inflight slots — this is the key to
+    // filling the batch pipeline. Each capture seeks to a different frame
+    // position and encodes in parallel.
+    while(inflightFrames.size<MAX_INFLIGHT&&!captureBusy){
+        const frameDur=1/Math.max(targetFps,1);
+        const nextTime=nextFrameTime;
+        if(nextTime>=vid.duration-0.02){
+            if(inflightFrames.size===0){stopInfer();log('Completed all frames','success');}
+            return;
+        }
+        nextFrameTime=nextTime+frameDur; // advance immediately for next iteration
+        captureFrame(nextTime);
     }
-    // Seek video to exact frame position, then capture
+}
+function captureFrame(seekTime){
     captureBusy=true;
-    vid.currentTime=nextTime;
-    const onReady=()=>{
-        vid.removeEventListener('seeked',onReady);
-        if(!streaming||paused){captureBusy=false;return;}
-        // Draw to both canvases from the same paused video frame (guaranteed sync)
+    vid.currentTime=seekTime;
+    const doCapture=()=>{
+        if(!streaming||paused){captureBusy=false;schedulePump();return;}
         hdCapCx.drawImage(vid,0,0,hdCap.width,hdCap.height);
         capCx.drawImage(vid,0,0,cap.width,cap.height);
         const frameTime=vid.currentTime;
-        const bitmapPromise=createImageBitmap(hdCap); // from canvas = guaranteed sync
+        const bitmapPromise=createImageBitmap(hdCap);
+        captureBusy=false; // release lock BEFORE async toBlob — allows next capture to start
+        schedulePump();    // pump next frame immediately
         cap.toBlob(async b=>{
-            captureBusy=false;
             if(!b||!streaming||paused){
                 bitmapPromise.then(bm=>{if(bm&&typeof bm.close==='function')bm.close()});
-                if(streaming&&!paused)schedulePump();
                 return;
             }
             try{
                 const [buf,bitmap]=await Promise.all([b.arrayBuffer(),bitmapPromise]);
                 if(!streaming||paused){
                     if(bitmap&&typeof bitmap.close==='function')bitmap.close();
-                    if(streaming&&!paused)schedulePump();
                     return;
                 }
                 frameId++;
@@ -771,19 +774,15 @@ function pumpFrames(){
                 const pc=buildPipelineConfig();
                 ws.send(JSON.stringify(Object.assign({type:'infer_header',request_id:rid,frame_id:frameId},pc.header)));
                 ws.send(buf);
-                nextFrameTime=frameTime+frameDur;
-                if(streaming&&!paused)schedulePump();
             }catch(err){
                 log('Capture failed: '+err.message,'error');
-                if(streaming&&!paused)schedulePump();
             }
         },'image/jpeg',JPEG_QUALITY);
     };
-    // For tiny seeks the frame may already be ready
-    if(Math.abs(vid.currentTime-nextTime)<0.01){
-        onReady();
+    if(Math.abs(vid.currentTime-seekTime)<0.01){
+        doCapture();
     }else{
-        vid.addEventListener('seeked',onReady,{once:true});
+        vid.addEventListener('seeked',doCapture,{once:true});
     }
 }
 

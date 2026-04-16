@@ -28,7 +28,7 @@ yolo_edge::json build_server_config(const yolo_edge::Config &config) {
           {"use_cuda", true},
           {"ort_threads", 4},
           {"batch_size", 6},
-          {"batch_wait_ms", 8},
+          {"batch_wait_ms", 30},
           {"batch_max_pending", 16}}},
         {"tracker",
          {{"enabled", true},
