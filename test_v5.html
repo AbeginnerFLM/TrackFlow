@@ -730,11 +730,14 @@ function pumpFrames(){
     if(!streaming||paused)return;
     if(!ws||ws.readyState!==1)return;
     if(ws.bufferedAmount>WS_BUFFER_HIGH_WATER){schedulePump();return;}
-    const slots=MAX_INFLIGHT-inflightFrames.size-pendingCaptures;
-    if(slots<=0)return;
+    // Wait until ALL previous frames are done before sending next full batch.
+    // This guarantees every infer_batch contains MAX_INFLIGHT frames,
+    // so the backend BatchEngine always gets a full GPU batch.
+    if(inflightFrames.size>0||pendingCaptures>0)return;
+    const slots=MAX_INFLIGHT;
     const frameDur=1/Math.max(targetFps,1);
     if(nextFrameTime>=vid.duration-0.02){
-        if(inflightFrames.size===0&&pendingCaptures===0){stopInfer();log('Completed all frames','success');}
+        stopInfer();log('Completed all frames','success');
         return;
     }
     // Determine how many frames to capture in this batch
