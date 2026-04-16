@@ -609,10 +609,12 @@ function closeFrameBitmap(){
 function schedulePump(){
     if(pumpScheduled)return;
     pumpScheduled=true;
-    requestAnimationFrame(()=>{
+    // Delay lets multiple results accumulate so the next captureBatch
+    // sends a full burst → backend BatchEngine can group them into one GPU batch.
+    setTimeout(()=>{
         pumpScheduled=false;
         pumpFrames();
-    });
+    },25);
 }
 
 function scheduleRender(){
