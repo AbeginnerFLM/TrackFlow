@@ -315,7 +315,8 @@ const cap=document.createElement('canvas'),capCx=cap.getContext('2d');
 const hdCap=document.createElement('canvas'),hdCapCx=hdCap.getContext('2d');
 let ws=null,streaming=false,paused=false;
 let frameId=0,scale=1,targetFps=10,videoLoaded=false,videoFps=30;
-const MAX_INFLIGHT=4;
+const MAX_INFLIGHT=8;
+const BATCH_SIZE=4;       // frames per infer_batch message
 const CAPTURE_MAX_WIDTH=640;
 const JPEG_QUALITY=0.80;
 const WS_BUFFER_HIGH_WATER=2*1024*1024;
@@ -700,7 +701,7 @@ function startInfer(){
     $('btnPause').classList.remove('hidden');$('btnStop').classList.remove('hidden');
     $('live').style.visibility='visible';
     vid.style.display='none';cvs.style.display='block';
-    log('Sequential processing started (batch='+MAX_INFLIGHT+', every frame)','success');
+    log('Sequential processing started (batch='+BATCH_SIZE+', pipeline='+MAX_INFLIGHT+', every frame)','success');
     ws.send(JSON.stringify({type:'reset'}));
     scheduleRender();
     schedulePump();
@@ -730,18 +731,16 @@ function pumpFrames(){
     if(!streaming||paused)return;
     if(!ws||ws.readyState!==1)return;
     if(ws.bufferedAmount>WS_BUFFER_HIGH_WATER){schedulePump();return;}
-    // Wait until ALL previous frames are done before sending next full batch.
-    // This guarantees every infer_batch contains MAX_INFLIGHT frames,
-    // so the backend BatchEngine always gets a full GPU batch.
-    if(inflightFrames.size>0||pendingCaptures>0)return;
-    const slots=MAX_INFLIGHT;
+    // Double-buffer pipeline: send a full BATCH_SIZE when enough slots free up.
+    // While GPU processes batch A, frontend captures+sends batch B → no GPU idle.
+    const slots=MAX_INFLIGHT-inflightFrames.size-pendingCaptures;
+    if(slots<BATCH_SIZE)return;
     const frameDur=1/Math.max(targetFps,1);
     if(nextFrameTime>=vid.duration-0.02){
-        stopInfer();log('Completed all frames','success');
+        if(inflightFrames.size===0&&pendingCaptures===0){stopInfer();log('Completed all frames','success');}
         return;
     }
-    // Determine how many frames to capture in this batch
-    const batchCount=Math.min(slots,Math.floor((vid.duration-0.02-nextFrameTime)/frameDur)+1);
+    const batchCount=Math.min(BATCH_SIZE,Math.floor((vid.duration-0.02-nextFrameTime)/frameDur)+1);
     if(batchCount<=0)return;
     pendingCaptures+=batchCount;
     captureBatch(nextFrameTime,batchCount,frameDur);
