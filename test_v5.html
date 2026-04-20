@@ -318,8 +318,8 @@ const cap=document.createElement('canvas'),capCx=cap.getContext('2d');
 const hdCap=document.createElement('canvas'),hdCapCx=hdCap.getContext('2d');
 let ws=null,streaming=false,paused=false;
 let frameId=0,scale=1,targetFps=10,videoLoaded=false,videoFps=30;
-const MAX_INFLIGHT=32;
-const BATCH_SIZE=16;      // larger batch = more content per network round-trip
+const MAX_INFLIGHT=8;
+const BATCH_SIZE=4;       // small batch keeps payload size low for bandwidth-limited links
 const CAPTURE_MAX_WIDTH=640;
 const JPEG_QUALITY=0.80;
 const WS_BUFFER_HIGH_WATER=2*1024*1024;
@@ -335,6 +335,8 @@ let latestFrameId=0;
 let latestFrameBitmap=null;
 const displayQueue=[];  // buffered results for smooth playback
 let displayDraining=false;
+let lastBatchArrival=0;
+let adaptiveInterval=60;  // ms between displayed frames; adapts to batch arrival rate
 let pumpScheduled=false;
 let renderScheduled=false;
 let laneUiDirty=false,laneUiTimer=null,lastLaneUiUpdate=0;
@@ -631,7 +633,8 @@ function drainDisplayQueue(){
     cx.clearRect(0,0,cvs.width,cvs.height);
     draw(latestDetections,latestFrameId);
     if(displayQueue.length>0){
-        setTimeout(drainDisplayQueue,Math.max(16,Math.round(1000/targetFps)));
+        // Use adaptive interval so 4 frames fill the batch cycle → continuous motion
+        setTimeout(drainDisplayQueue,adaptiveInterval);
     }else{
         displayDraining=false;
     }
@@ -750,6 +753,8 @@ function stopInfer(){
     streaming=false;paused=false;
     captureInProgress=false;
     displayDraining=false;
+    lastBatchArrival=0;
+    adaptiveInterval=60;
     pendingCaptures=0;
     clearInflightFrames();
     displayQueue.length=0;
@@ -865,6 +870,17 @@ function onMsg(data){
         }
         // ── batch_result: all frames from one infer_batch arrive together ──
         if(r.type==='batch_result'&&Array.isArray(r.results)){
+            // Measure batch arrival interval → spread frames evenly across it
+            const now=performance.now();
+            if(lastBatchArrival>0){
+                const delta=now-lastBatchArrival;
+                const framesInBatch=Math.max(1,r.results.length);
+                // EMA smoothing to avoid jitter, clamp to [video frame duration, 2s/frame]
+                const target=delta/framesInBatch;
+                const clamped=Math.max(Math.round(1000/Math.max(targetFps,1)),Math.min(2000,target));
+                adaptiveInterval=Math.round(adaptiveInterval*0.5+clamped*0.5);
+            }
+            lastBatchArrival=now;
             for(const res of r.results){
                 if(res.type==='error'){
                     if(res.request_id){
